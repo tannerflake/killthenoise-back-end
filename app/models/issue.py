@@ -22,6 +22,7 @@ class Issue(Base):
     type = Column(String, nullable=True)
     tags = Column(String, nullable=True)  # CSV string for now
     jira_issue_key = Column(String, nullable=True)
+    hubspot_ticket_id = Column(String, nullable=True, unique=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

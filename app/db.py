@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
-from typing import AsyncGenerator, Optional
 
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from supabase import Client, create_client
+
+# Load env before anything else
+load_dotenv()
 
 # Environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -20,13 +22,17 @@ AsyncSessionLocal = sessionmaker(engine, expire_on_commit=False, class_=AsyncSes
 Base = declarative_base()
 
 
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
+async def get_db():
     """FastAPI dependency that yields an async database session."""
     async with AsyncSessionLocal() as session:
         yield session
 
 
 # Supabase client (optional)
+from typing import Optional
+
+from supabase import Client, create_client
+
 SUPABASE: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
     SUPABASE = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) 

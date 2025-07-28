@@ -17,6 +17,7 @@ class Issue(BaseModel):
     type: Optional[str] = None
     tags: Optional[List[str]] = None
     jira_issue_key: Optional[str] = None
+    hubspot_ticket_id: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

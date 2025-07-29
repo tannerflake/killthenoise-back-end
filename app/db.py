@@ -10,7 +10,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 load_dotenv()
 
 # Environment variables
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
@@ -35,4 +35,4 @@ from supabase import Client, create_client
 
 SUPABASE: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-    SUPABASE = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) 
+    SUPABASE = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)

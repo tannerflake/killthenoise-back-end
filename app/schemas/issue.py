@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, UUID4
+from pydantic import UUID4, BaseModel
 
 
 class Issue(BaseModel):
@@ -22,4 +22,4 @@ class Issue(BaseModel):
     updated_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True 
+        orm_mode = True

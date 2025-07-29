@@ -11,7 +11,8 @@ from app.db import Base, engine
 # Load environment variables early
 load_dotenv()
 
-from app.api import hubspot, integrations, issues, jira, sync, analytics, webhooks  # noqa: E402
+from app.api import (analytics, hubspot, integrations, issues,  # noqa: E402
+                     jira, sync, webhooks)
 from app.services.scheduler_service import scheduler_service  # noqa: E402
 
 app = FastAPI(title="KillTheNoise API")
@@ -34,7 +35,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def on_startup() -> None:
     """Create database tables if they don't exist and start scheduler."""
-    
+
     async def _create() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -45,7 +46,7 @@ async def on_startup() -> None:
     except Exception as exc:  # pragma: no cover
         # Log but don't crash the app; handle outside if needed
         print(f"[Startup] Failed to create tables: {exc!r}")
-    
+
     # Start the scheduler service
     try:
         await scheduler_service.start()
@@ -62,8 +63,9 @@ async def on_shutdown() -> None:
         print("[Shutdown] Scheduler service stopped")
     except Exception as exc:
         print(f"[Shutdown] Error stopping scheduler: {exc!r}")
-    
+
     await engine.dispose()
+
 
 # Include API routers
 app.include_router(hubspot.router)
@@ -72,4 +74,4 @@ app.include_router(integrations.router)
 app.include_router(jira.router)
 app.include_router(sync.router)
 app.include_router(analytics.router)
-app.include_router(webhooks.router) 
+app.include_router(webhooks.router)

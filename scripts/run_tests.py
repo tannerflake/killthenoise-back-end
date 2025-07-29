@@ -10,12 +10,7 @@ def run_command(command: list[str], description: str) -> bool:
     """Run a command and return success status."""
     print(f"Running: {description}")
     try:
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True
-        )
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
         print(f"✅ {description} completed successfully")
         if result.stdout:
             print(result.stdout)
@@ -30,44 +25,65 @@ def main():
     """Main test runner function."""
     print("🧪 Running KillTheNoise Backend Tests")
     print("=" * 50)
-    
+
     # Check if we're in the right directory
     if not Path("pyproject.toml").exists():
-        print("❌ Error: pyproject.toml not found. Run this script from the project root.")
+        print(
+            "❌ Error: pyproject.toml not found. Run this script from the project root."
+        )
         sys.exit(1)
-    
+
     # Run different types of tests
     test_commands = [
-        (["python", "-m", "pytest", "tests/", "-v"], "Unit and Integration Tests"),
-        (["python", "-m", "pytest", "tests/test_api_endpoints.py", "-v"], "API Endpoint Tests"),
-        (["python", "-m", "pytest", "tests/test_services.py", "-v"], "Service Layer Tests"),
-        (["python", "-m", "pytest", "tests/test_models.py", "-v"], "Database Model Tests"),
-        (["python", "-m", "pytest", "tests/", "--cov=app", "--cov-report=term-missing"], "Tests with Coverage"),
+        (["python3", "-m", "pytest", "tests/", "-v"], "Unit and Integration Tests"),
+        (
+            ["python3", "-m", "pytest", "tests/test_api_endpoints.py", "-v"],
+            "API Endpoint Tests",
+        ),
+        (
+            ["python3", "-m", "pytest", "tests/test_services.py", "-v"],
+            "Service Layer Tests",
+        ),
+        (
+            ["python3", "-m", "pytest", "tests/test_models.py", "-v"],
+            "Database Model Tests",
+        ),
+        (
+            [
+                "python3",
+                "-m",
+                "pytest",
+                "tests/",
+                "--cov=app",
+                "--cov-report=term-missing",
+            ],
+            "Tests with Coverage",
+        ),
     ]
-    
+
     all_passed = True
-    
+
     for command, description in test_commands:
         if not run_command(command, description):
             all_passed = False
             print(f"\n⚠️  {description} failed. Continuing with other tests...\n")
-    
+
     # Run code quality checks
     print("\n🔍 Running Code Quality Checks")
     print("-" * 30)
-    
+
     quality_commands = [
         (["black", "--check", "app/", "tests/"], "Code Formatting Check"),
         (["isort", "--check-only", "app/", "tests/"], "Import Sorting Check"),
         (["flake8", "app/", "tests/"], "Linting Check"),
         (["mypy", "app/"], "Type Checking"),
     ]
-    
+
     for command, description in quality_commands:
         if not run_command(command, description):
             all_passed = False
             print(f"\n⚠️  {description} failed. Continuing with other checks...\n")
-    
+
     # Summary
     print("\n" + "=" * 50)
     if all_passed:
@@ -80,4 +96,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

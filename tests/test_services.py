@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Dict, Any
+from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.issue import Issue
+from app.models.sync_event import SyncEvent
+from app.models.tenant_integration import TenantIntegration
 from app.services.calculation_service import CalculationService
 from app.services.hubspot_service import HubSpotService
 from app.services.scheduler_service import SchedulerService
-from app.models.issue import Issue
-from app.models.tenant_integration import TenantIntegration
-from app.models.sync_event import SyncEvent
 
 
 class TestCalculationService:
@@ -25,7 +25,10 @@ class TestCalculationService:
         tenant_id = uuid.uuid4()
         calc_service = CalculationService(tenant_id)
         
-        result = await calc_service.calculate_issue_metrics(time_range_days=30)
+        # Mock the database session to use our test session
+        with patch('app.services.calculation_service.get_db') as mock_get_db:
+            mock_get_db.return_value = db_session
+            result = await calc_service.calculate_issue_metrics(time_range_days=30)
         
         assert result["total_issues"] == 0
         assert result["avg_severity"] == 0
@@ -36,7 +39,7 @@ class TestCalculationService:
     async def test_calculate_issue_metrics_with_data(self, db_session: AsyncSession):
         """Test metrics calculation with sample issues."""
         tenant_id = uuid.uuid4()
-        
+
         # Create sample issues
         issues = [
             Issue(
@@ -45,7 +48,7 @@ class TestCalculationService:
                 title="High Priority Issue",
                 source="hubspot",
                 severity=5,
-                status="open"
+                status="open",
             ),
             Issue(
                 id=uuid.uuid4(),
@@ -53,17 +56,17 @@ class TestCalculationService:
                 title="Medium Priority Issue",
                 source="jira",
                 severity=3,
-                status="resolved"
-            )
+                status="resolved",
+            ),
         ]
-        
+
         for issue in issues:
             db_session.add(issue)
         await db_session.commit()
-        
+
         calc_service = CalculationService(tenant_id)
         result = await calc_service.calculate_issue_metrics(time_range_days=30)
-        
+
         assert result["total_issues"] == 2
         assert result["avg_severity"] == 4.0
         assert "hubspot" in result["source_distribution"]
@@ -75,7 +78,7 @@ class TestCalculationService:
     async def test_calculate_source_comparison(self, db_session: AsyncSession):
         """Test source comparison calculation."""
         tenant_id = uuid.uuid4()
-        
+
         # Create issues from different sources
         issues = [
             Issue(
@@ -83,24 +86,24 @@ class TestCalculationService:
                 tenant_id=tenant_id,
                 title="HubSpot Issue",
                 source="hubspot",
-                severity=4
+                severity=4,
             ),
             Issue(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 title="Jira Issue",
                 source="jira",
-                severity=3
-            )
+                severity=3,
+            ),
         ]
-        
+
         for issue in issues:
             db_session.add(issue)
         await db_session.commit()
-        
+
         calc_service = CalculationService(tenant_id)
         result = await calc_service.calculate_source_comparison(time_range_days=30)
-        
+
         assert "sources" in result
         assert "hubspot" in result["sources"]
         assert "jira" in result["sources"]
@@ -110,35 +113,35 @@ class TestCalculationService:
     async def test_calculate_trends(self, db_session: AsyncSession):
         """Test trend calculation."""
         tenant_id = uuid.uuid4()
-        
+
         # Create issues with different dates
         today = dt.datetime.utcnow()
         yesterday = today - dt.timedelta(days=1)
-        
+
         issues = [
             Issue(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 title="Today's Issue",
                 source="hubspot",
-                created_at=today
+                created_at=today,
             ),
             Issue(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 title="Yesterday's Issue",
                 source="jira",
-                created_at=yesterday
-            )
+                created_at=yesterday,
+            ),
         ]
-        
+
         for issue in issues:
             db_session.add(issue)
         await db_session.commit()
-        
+
         calc_service = CalculationService(tenant_id)
         result = await calc_service.calculate_trends(days=7)
-        
+
         assert "trends" in result
         assert result["total_days"] == 7
         assert result["total_issues"] == 2
@@ -147,7 +150,7 @@ class TestCalculationService:
     async def test_get_top_issues(self, db_session: AsyncSession):
         """Test getting top issues by severity."""
         tenant_id = uuid.uuid4()
-        
+
         # Create issues with different severities
         issues = [
             Issue(
@@ -155,24 +158,24 @@ class TestCalculationService:
                 tenant_id=tenant_id,
                 title="Critical Issue",
                 source="hubspot",
-                severity=5
+                severity=5,
             ),
             Issue(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 title="Low Priority Issue",
                 source="jira",
-                severity=2
-            )
+                severity=2,
+            ),
         ]
-        
+
         for issue in issues:
             db_session.add(issue)
         await db_session.commit()
-        
+
         calc_service = CalculationService(tenant_id)
         result = await calc_service.get_top_issues(limit=10)
-        
+
         assert len(result) == 2
         # Should be ordered by severity (highest first)
         assert result[0]["severity"] == 5
@@ -182,11 +185,11 @@ class TestCalculationService:
     async def test_calculate_change_velocity(self, db_session: AsyncSession):
         """Test change velocity calculation."""
         tenant_id = uuid.uuid4()
-        
+
         # Create resolved issues
         today = dt.datetime.utcnow()
         yesterday = today - dt.timedelta(days=1)
-        
+
         issues = [
             Issue(
                 id=uuid.uuid4(),
@@ -194,7 +197,7 @@ class TestCalculationService:
                 title="Created Today",
                 source="hubspot",
                 created_at=today,
-                status="open"
+                status="open",
             ),
             Issue(
                 id=uuid.uuid4(),
@@ -203,17 +206,17 @@ class TestCalculationService:
                 source="jira",
                 created_at=yesterday,
                 status="resolved",
-                updated_at=today
-            )
+                updated_at=today,
+            ),
         ]
-        
+
         for issue in issues:
             db_session.add(issue)
         await db_session.commit()
-        
+
         calc_service = CalculationService(tenant_id)
         result = await calc_service.calculate_change_velocity(days=30)
-        
+
         assert "creation_rate" in result
         assert "resolution_rate" in result
         assert "backlog_growth" in result
@@ -229,9 +232,9 @@ class TestHubSpotService:
         """Test HubSpot service initialization."""
         tenant_id = uuid.uuid4()
         integration_id = uuid.uuid4()
-        
+
         service = HubSpotService(tenant_id, integration_id)
-        
+
         assert service.tenant_id == tenant_id
         assert service.integration_id == integration_id
         assert service._client is None
@@ -242,7 +245,7 @@ class TestHubSpotService:
         tenant_id = uuid.uuid4()
         integration_id = uuid.uuid4()
         service = HubSpotService(tenant_id, integration_id)
-        
+
         # Sample HubSpot ticket
         ticket = {
             "id": "12345",
@@ -251,12 +254,12 @@ class TestHubSpotService:
                 "content": "This is a test ticket",
                 "hs_ticket_priority": "high",
                 "hs_pipeline_stage": "open",
-                "hs_ticket_category": "bug"
-            }
+                "hs_ticket_category": "bug",
+            },
         }
-        
+
         result = service._transform_ticket_to_issue(ticket)
-        
+
         assert result["tenant_id"] == tenant_id
         assert result["title"] == "Test Ticket"
         assert result["description"] == "This is a test ticket"
@@ -270,7 +273,7 @@ class TestHubSpotService:
         tenant_id = uuid.uuid4()
         integration_id = uuid.uuid4()
         service = HubSpotService(tenant_id, integration_id)
-        
+
         # Test different priority levels
         assert service._calculate_severity({"hs_ticket_priority": "urgent"}) == 5
         assert service._calculate_severity({"hs_ticket_priority": "high"}) == 4
@@ -284,22 +287,19 @@ class TestHubSpotService:
         tenant_id = uuid.uuid4()
         integration_id = uuid.uuid4()
         service = HubSpotService(tenant_id, integration_id)
-        
+
         # Test ticket property change webhook
         webhook_data = {
             "subscriptionType": "ticket.propertyChange",
-            "objectId": "12345"
+            "objectId": "12345",
         }
-        
+
         result = service._extract_ticket_ids_from_webhook(webhook_data)
         assert result == ["12345"]
-        
+
         # Test unknown webhook type
-        unknown_webhook = {
-            "subscriptionType": "unknown.type",
-            "objectId": "12345"
-        }
-        
+        unknown_webhook = {"subscriptionType": "unknown.type", "objectId": "12345"}
+
         result = service._extract_ticket_ids_from_webhook(unknown_webhook)
         assert result == []
 
@@ -310,7 +310,7 @@ class TestSchedulerService:
     def test_scheduler_initialization(self):
         """Test scheduler service initialization."""
         scheduler = SchedulerService()
-        
+
         assert scheduler.running is False
         assert len(scheduler.sync_tasks) == 0
         assert "hubspot" in scheduler.sync_intervals
@@ -321,11 +321,11 @@ class TestSchedulerService:
     async def test_scheduler_start_stop(self):
         """Test scheduler start and stop operations."""
         scheduler = SchedulerService()
-        
+
         # Start scheduler
         await scheduler.start()
         assert scheduler.running is True
-        
+
         # Stop scheduler
         await scheduler.stop()
         assert scheduler.running is False
@@ -334,7 +334,7 @@ class TestSchedulerService:
     async def test_get_sync_status(self, db_session: AsyncSession):
         """Test getting sync status."""
         scheduler = SchedulerService()
-        
+
         # Create sample integration
         integration = TenantIntegration(
             id=uuid.uuid4(),
@@ -342,14 +342,14 @@ class TestSchedulerService:
             integration_type="hubspot",
             is_active=True,
             config={"access_token": "test"},
-            last_sync_status="success"
+            last_sync_status="success",
         )
-        
+
         db_session.add(integration)
         await db_session.commit()
-        
+
         result = await scheduler.get_sync_status()
-        
+
         assert "running_tasks" in result
         assert "integrations" in result
         assert len(result["integrations"]) >= 1
@@ -359,25 +359,23 @@ class TestSchedulerService:
         """Test manual sync triggering."""
         scheduler = SchedulerService()
         tenant_id = uuid.uuid4()
-        
+
         # Create sample integration
         integration = TenantIntegration(
             id=uuid.uuid4(),
             tenant_id=tenant_id,
             integration_type="hubspot",
             is_active=True,
-            config={"access_token": "test"}
+            config={"access_token": "test"},
         )
-        
+
         db_session.add(integration)
         await db_session.commit()
-        
+
         result = await scheduler.trigger_manual_sync(
-            tenant_id=tenant_id,
-            integration_type="hubspot",
-            sync_type="incremental"
+            tenant_id=tenant_id, integration_type="hubspot", sync_type="incremental"
         )
-        
+
         assert "success" in result
         assert "integration_id" in result
-        assert "sync_type" in result 
+        assert "sync_type" in result

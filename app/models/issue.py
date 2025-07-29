@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Column, DateTime, Integer, String, Index
+from sqlalchemy import Column, DateTime, Index, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -31,8 +31,8 @@ class Issue(Base):
 
     # Composite indexes for common queries
     __table_args__ = (
-        Index('ix_issues_tenant_source', 'tenant_id', 'source'),
-        Index('ix_issues_tenant_severity', 'tenant_id', 'severity'),
-        Index('ix_issues_tenant_status', 'tenant_id', 'status'),
-        Index('ix_issues_tenant_created', 'tenant_id', 'created_at'),
-    ) 
+        Index("ix_issues_tenant_source", "tenant_id", "source"),
+        Index("ix_issues_tenant_severity", "tenant_id", "severity"),
+        Index("ix_issues_tenant_status", "tenant_id", "status"),
+        Index("ix_issues_tenant_created", "tenant_id", "created_at"),
+    )

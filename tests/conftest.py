@@ -14,22 +14,15 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base, get_db
 from app.main import app
 
-
 # Test database URL (in-memory SQLite for testing)
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 # Create test engine
-test_engine = create_async_engine(
-    TEST_DATABASE_URL,
-    echo=False,
-    future=True
-)
+test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)
 
 # Create test session factory
 TestingSessionLocal = sessionmaker(
-    test_engine,
-    expire_on_commit=False,
-    class_=AsyncSession
+    test_engine, expire_on_commit=False, class_=AsyncSession
 )
 
 
@@ -62,10 +55,10 @@ async def db_session(test_db_setup) -> AsyncGenerator[AsyncSession, None]:
 @pytest.fixture
 def client(db_session: AsyncSession) -> TestClient:
     """Create a test client with database session."""
-    
+
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
         yield db_session
-    
+
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
         yield test_client
@@ -93,7 +86,7 @@ def mock_hubspot_service() -> AsyncMock:
         "success": True,
         "processed": 5,
         "updated": 3,
-        "duration_seconds": 2
+        "duration_seconds": 2,
     }
     return mock_service
 
@@ -115,7 +108,7 @@ def sample_issue_data() -> dict:
         "jira_issue_key": None,
         "hubspot_ticket_id": "12345",
         "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:00Z"
+        "updated_at": "2024-01-01T00:00:00Z",
     }
 
 
@@ -127,15 +120,12 @@ def sample_tenant_integration_data() -> dict:
         "tenant_id": str(uuid.uuid4()),
         "integration_type": "hubspot",
         "is_active": True,
-        "config": {
-            "access_token": "test_token",
-            "domain": "test.hubapi.com"
-        },
+        "config": {"access_token": "test_token", "domain": "test.hubapi.com"},
         "last_synced_at": "2024-01-01T00:00:00Z",
         "last_sync_status": "success",
         "sync_error_message": None,
         "webhook_url": "https://test.com/webhooks/hubspot",
         "webhook_secret": "test_secret",
         "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:00Z"
-    } 
+        "updated_at": "2024-01-01T00:00:00Z",
+    }

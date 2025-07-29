@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Dict, Any
+from typing import Any, Dict
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,7 +37,9 @@ class TestAnalyticsEndpoints:
 
     def test_get_severity_distribution(self, client: TestClient, sample_tenant_id: str):
         """Test getting severity distribution."""
-        response = client.get(f"/api/analytics/severity-distribution/{sample_tenant_id}")
+        response = client.get(
+            f"/api/analytics/severity-distribution/{sample_tenant_id}"
+        )
         assert response.status_code == 200
         data = response.json()
         assert "distribution" in data
@@ -91,7 +93,9 @@ class TestSyncEndpoints:
         assert "running_tasks" in data
         assert "integrations" in data
 
-    def test_get_sync_status_with_tenant(self, client: TestClient, sample_tenant_id: str):
+    def test_get_sync_status_with_tenant(
+        self, client: TestClient, sample_tenant_id: str
+    ):
         """Test getting sync status for specific tenant."""
         response = client.get(f"/api/sync/status?tenant_id={sample_tenant_id}")
         assert response.status_code == 200
@@ -104,7 +108,7 @@ class TestSyncEndpoints:
         sync_data = {
             "tenant_id": sample_tenant_id,
             "integration_type": "hubspot",
-            "sync_type": "incremental"
+            "sync_type": "incremental",
         }
         response = client.post("/api/sync/trigger", json=sync_data)
         assert response.status_code == 200
@@ -144,11 +148,10 @@ class TestWebhookEndpoints:
             "subscriptionType": "ticket.propertyChange",
             "objectId": "12345",
             "propertyName": "hs_ticket_priority",
-            "propertyValue": "high"
+            "propertyValue": "high",
         }
         response = client.post(
-            f"/api/webhooks/hubspot/{sample_tenant_id}",
-            json=webhook_data
+            f"/api/webhooks/hubspot/{sample_tenant_id}", json=webhook_data
         )
         assert response.status_code == 200
         data = response.json()
@@ -160,15 +163,11 @@ class TestWebhookEndpoints:
             "issue": {
                 "id": "12345",
                 "key": "TEST-123",
-                "fields": {
-                    "summary": "Test Issue",
-                    "priority": "High"
-                }
+                "fields": {"summary": "Test Issue", "priority": "High"},
             }
         }
         response = client.post(
-            f"/api/webhooks/jira/{sample_tenant_id}",
-            json=webhook_data
+            f"/api/webhooks/jira/{sample_tenant_id}", json=webhook_data
         )
         assert response.status_code == 200
         data = response.json()
@@ -259,4 +258,4 @@ class TestJiraEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "success" in data
-        assert "matched" in data 
+        assert "matched" in data

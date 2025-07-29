@@ -31,9 +31,7 @@ async def save_or_update(
     await session.commit()
 
 
-async def get(
-    session: AsyncSession, provider: str
-) -> Optional[IntegrationToken]:
+async def get(session: AsyncSession, provider: str) -> Optional[IntegrationToken]:
     return await session.get(IntegrationToken, provider)
 
 
@@ -60,12 +58,18 @@ async def get_valid_access_token(
             "client_secret": client_secret,
             "refresh_token": token.refresh_token,
         }
-        resp = await client.post(HUBSPOT_TOKEN_URL, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        resp = await client.post(
+            HUBSPOT_TOKEN_URL,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
         resp.raise_for_status()
         payload = resp.json()
 
     token.access_token = payload["access_token"]
     token.refresh_token = payload.get("refresh_token", token.refresh_token)
-    token.expires_at = dt.datetime.utcnow() + dt.timedelta(seconds=payload["expires_in"])
+    token.expires_at = dt.datetime.utcnow() + dt.timedelta(
+        seconds=payload["expires_in"]
+    )
     await session.commit()
-    return token.access_token 
+    return token.access_token

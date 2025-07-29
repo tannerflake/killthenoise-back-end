@@ -17,7 +17,7 @@ async def upsert_many(session: AsyncSession, issues: Iterable[dict]) -> List[Iss
         return []
 
     stmt = pg_insert(Issue).values(list(issues))
-    
+
     # Determine conflict resolution strategy
     if any(i.get("hubspot_ticket_id") for i in issues):
         # Use tenant_id + hubspot_ticket_id for conflict resolution
@@ -40,4 +40,4 @@ async def upsert_many(session: AsyncSession, issues: Iterable[dict]) -> List[Iss
     q = await session.execute(
         Issue.select().where(Issue.id.in_(ids))  # type: ignore[attr-defined]
     )
-    return q.scalars().all() 
+    return q.scalars().all()

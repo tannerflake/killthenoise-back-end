@@ -21,4 +21,41 @@ async def hubspot_status() -> Dict[str, bool]:
 async def hubspot_sync(background_tasks: BackgroundTasks) -> Dict[str, bool]:
     """Kick off HubSpot tickets sync in the background."""
     background_tasks.add_task(hubspot_service.sync)
+    return {"success": True}
+
+
+# -------------------------------------------------------------------------
+# OAuth 2.0 authorization flow helpers
+# -------------------------------------------------------------------------
+
+
+@router.get("/authorize", response_model=Dict[str, str])
+async def hubspot_authorize_url() -> Dict[str, str]:
+    """Return the HubSpot OAuth authorization URL that the frontend should redirect users to."""
+
+    import urllib.parse as up
+    import os
+
+    client_id = os.getenv("HUBSPOT_CLIENT_ID")
+    redirect_uri = os.getenv("HUBSPOT_REDIRECT_URI")
+    scope = "tickets%20crm.objects.contacts.read"  # minimal scope for tickets; adjust as needed
+
+    params = up.urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": scope,
+            "response_type": "code",
+        }
+    )
+
+    url = f"https://app.hubspot.com/oauth/authorize?{params}"
+    return {"url": url}
+
+
+@router.post("/oauth/callback", response_model=Dict[str, bool])
+async def hubspot_oauth_callback(code: str) -> Dict[str, bool]:
+    """Exchange the oauth `code` for tokens and persist them."""
+
+    await hubspot_service.exchange_code_for_tokens(code)
     return {"success": True} 

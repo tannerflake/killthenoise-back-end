@@ -32,17 +32,40 @@ class HubSpotService:
     """
 
     def __init__(self) -> None:
-        # Prefer private-app token for dev; later we'll support OAuth access tokens.
-        self._access_token: str | None = os.getenv("HUBSPOT_ACCESS_TOKEN")
-        if not self._access_token:
-            # Fallback to env var pattern used in the task description.
-            self._access_token = os.getenv("HUBSPOT_SERVICE_ROLE_KEY")  # type: ignore[assignment]
+        """Create bare client; token headers are injected dynamically."""
 
-        self._client = httpx.AsyncClient(
-            base_url=HUBSPOT_BASE_URL,
-            headers={"Authorization": f"Bearer {self._access_token}"},
-            timeout=30,
-        )
+        self._client = httpx.AsyncClient(base_url=HUBSPOT_BASE_URL, timeout=30)
+
+        # OAuth app credentials (static)
+        self._client_id: str | None = os.getenv("HUBSPOT_CLIENT_ID")
+        self._client_secret: str | None = os.getenv("HUBSPOT_CLIENT_SECRET")
+
+        if not self._client_id or not self._client_secret:
+            raise RuntimeError("HUBSPOT_CLIENT_ID and HUBSPOT_CLIENT_SECRET must be set.")
+
+    # ------------------------------------------------------------------
+    # Internal helpers for token management
+    # ------------------------------------------------------------------
+
+    async def _inject_auth_header(self) -> None:
+        """Ensure we have a valid access token and set it on the httpx client."""
+        from app.services import token_service  # local import to avoid cycles
+
+        async for session in get_db():
+            access_token = await token_service.get_valid_access_token(
+                session=session,
+                provider="hubspot",
+                client_id=self._client_id,
+                client_secret=self._client_secret,
+            )
+            break
+
+        if not access_token:
+            raise RuntimeError(
+                "No HubSpot access token available. Complete OAuth flow first."
+            )
+
+        self._client.headers["Authorization"] = f"Bearer {access_token}"
 
     # ---------------------------------------------------------------------
     # Public helpers
@@ -50,6 +73,7 @@ class HubSpotService:
 
     async def status(self) -> bool:
         """Return True when credentials are valid and HubSpot API responds."""
+        await self._inject_auth_header()
         try:
             r = await self._client.get("/integrations/v1/me")
             return r.status_code == 200
@@ -60,6 +84,7 @@ class HubSpotService:
         """Background job placeholder that will fetch & upsert tickets."""
         # TODO: determine last sync timestamp (store in DB / cache)
         # last_synced_at = await self._get_last_synced_at()
+
         tickets: List[dict[str, Any]] = await self._fetch_tickets()
 
         issue_dicts: List[dict[str, Any]] = []
@@ -95,6 +120,7 @@ class HubSpotService:
 
     async def _fetch_tickets(self, after: dt.datetime | None = None) -> List[dict[str, Any]]:
         """Fetch tickets from HubSpot CRM v3 objects API with basic pagination."""
+        await self._inject_auth_header()
         tickets: list[dict[str, Any]] = []
 
         params = {
@@ -123,6 +149,45 @@ class HubSpotService:
                 break
 
         return tickets
+
+    # ------------------------------------------------------------------
+    # OAuth helpers (called from API router)
+    # ------------------------------------------------------------------
+
+    async def exchange_code_for_tokens(self, code: str) -> None:
+        """Exchange an OAuth authorization code for tokens and persist them."""
+        if not self._client_id or not self._client_secret:
+            raise RuntimeError("HubSpot OAuth client credentials missing.")
+
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": self._client_id,
+            "client_secret": self._client_secret,
+            "redirect_uri": os.getenv("HUBSPOT_REDIRECT_URI"),
+            "code": code,
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.hubapi.com/oauth/v1/token",
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp.raise_for_status()
+
+        payload = resp.json()
+
+        from app.services import token_service  # local import
+
+        async for session in get_db():  # type: AsyncGenerator
+            await token_service.save_or_update(
+                session=session,
+                provider="hubspot",
+                access_token=payload["access_token"],
+                refresh_token=payload["refresh_token"],
+                expires_in=payload["expires_in"],
+            )
+            break
 
 
 # Singleton instance used by routers

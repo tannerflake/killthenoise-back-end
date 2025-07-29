@@ -11,7 +11,7 @@ from app.db import Base, engine
 # Load environment variables early
 load_dotenv()
 
-from app.api import (analytics, hubspot, integrations, issues,  # noqa: E402
+from app.api import (analytics, hubspot, health, integrations, issues,  # noqa: E402
                      jira, sync, webhooks)
 from app.services.scheduler_service import scheduler_service  # noqa: E402
 
@@ -68,6 +68,7 @@ async def on_shutdown() -> None:
 
 
 # Include API routers
+app.include_router(health.router)
 app.include_router(hubspot.router)
 app.include_router(issues.router)
 app.include_router(integrations.router)

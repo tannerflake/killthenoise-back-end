@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-from typing import Any, List, AsyncGenerator
+import time
+from typing import Any, List, AsyncGenerator, Optional, Dict
+from uuid import UUID
 
 import httpx
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.db import get_db
 from app.services.issue_service import upsert_many
+from app.models.tenant_integration import TenantIntegration
+from app.models.sync_event import SyncEvent
 
 # Base HubSpot API URL (v3 CRM + misc legacy endpoints)
 HUBSPOT_BASE_URL = "https://api.hubapi.com"
@@ -21,174 +26,320 @@ TICKET_PROPERTIES = [
     "hs_lastmodifieddate",
     "hs_pipeline_stage",
     "hs_ticket_priority",
+    "hs_createdate",
+    "hs_ticket_category",
+    "hs_ticket_priority",
+    "hs_resolution",
 ]
 
 
 class HubSpotService:
-    """Minimal async wrapper around HubSpot REST API.
+    """Multi-tenant async wrapper around HubSpot REST API with change detection."""
 
-    For now we support a simple connectivity check and ticket sync skeleton.
-    Later we will extend this class with OAuth refresh, incremental paging, etc.
-    """
+    def __init__(self, tenant_id: UUID, integration_id: UUID) -> None:
+        self.tenant_id = tenant_id
+        self.integration_id = integration_id
+        self._client: Optional[httpx.AsyncClient] = None
 
-    def __init__(self) -> None:
-        """Create bare client; token headers are injected dynamically."""
+    async def _get_integration_config(self, session: AsyncSession) -> Dict[str, Any]:
+        """Get tenant-specific HubSpot configuration."""
+        stmt = select(TenantIntegration).where(
+            TenantIntegration.id == self.integration_id,
+            TenantIntegration.tenant_id == self.tenant_id
+        )
+        result = await session.execute(stmt)
+        integration = result.scalar_one_or_none()
+        
+        if not integration or not integration.is_active:
+            raise ValueError(f"Integration {self.integration_id} not found or inactive")
+        
+        return integration.config
 
-        self._client = httpx.AsyncClient(base_url=HUBSPOT_BASE_URL, timeout=30)
-
-        # OAuth app credentials (static)
-        self._client_id: str | None = os.getenv("HUBSPOT_CLIENT_ID")
-        self._client_secret: str | None = os.getenv("HUBSPOT_CLIENT_SECRET")
-
-        if not self._client_id or not self._client_secret:
-            raise RuntimeError("HUBSPOT_CLIENT_ID and HUBSPOT_CLIENT_SECRET must be set.")
-
-    # ------------------------------------------------------------------
-    # Internal helpers for token management
-    # ------------------------------------------------------------------
-
-    async def _inject_auth_header(self) -> None:
-        """Ensure we have a valid access token and set it on the httpx client."""
-        from app.services import token_service  # local import to avoid cycles
-
-        async for session in get_db():
-            access_token = await token_service.get_valid_access_token(
-                session=session,
-                provider="hubspot",
-                client_id=self._client_id,
-                client_secret=self._client_secret,
+    async def _get_client(self, session: AsyncSession) -> httpx.AsyncClient:
+        """Get configured HTTP client for this tenant's HubSpot integration."""
+        if self._client is None:
+            config = await self._get_integration_config(session)
+            access_token = config.get("access_token")
+            
+            if not access_token:
+                raise ValueError("HubSpot access token not configured")
+            
+            self._client = httpx.AsyncClient(
+                base_url=HUBSPOT_BASE_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=30,
             )
-            break
-
-        if not access_token:
-            raise RuntimeError(
-                "No HubSpot access token available. Complete OAuth flow first."
-            )
-
-        self._client.headers["Authorization"] = f"Bearer {access_token}"
-
-    # ---------------------------------------------------------------------
-    # Public helpers
-    # ---------------------------------------------------------------------
+        
+        return self._client
 
     async def status(self) -> bool:
         """Return True when credentials are valid and HubSpot API responds."""
-        await self._inject_auth_header()
-        try:
-            r = await self._client.get("/integrations/v1/me")
-            return r.status_code == 200
-        except httpx.HTTPError:
-            return False
-
-    async def sync(self) -> None:
-        """Background job placeholder that will fetch & upsert tickets."""
-        # TODO: determine last sync timestamp (store in DB / cache)
-        # last_synced_at = await self._get_last_synced_at()
-
-        tickets: List[dict[str, Any]] = await self._fetch_tickets()
-
-        issue_dicts: List[dict[str, Any]] = []
-        for t in tickets:
-            props = t.get("properties", {})
-            issue_dicts.append(
-                {
-                    "hubspot_ticket_id": str(t["id"]),
-                    "id": uuid.uuid5(uuid.NAMESPACE_URL, f"hubspot-{t['id']}").hex,
-                    "title": props.get("subject") or f"Ticket {t['id']}",
-                    "description": props.get("content"),
-                    "source": "hubspot",
-                    "severity": None,
-                    "frequency": None,
-                    "status": props.get("hs_pipeline_stage"),
-                    "type": None,
-                    "tags": props.get("hs_ticket_priority"),
-                }
-            )
-
-        if not issue_dicts:
-            return
-
-        async for session in get_db():  # type: AsyncGenerator
-            await upsert_many(session, issue_dicts)
-            break
-
-        print(f"[HubSpotService] Synced {len(issue_dicts)} HubSpot tickets → issues.")
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _fetch_tickets(self, after: dt.datetime | None = None) -> List[dict[str, Any]]:
-        """Fetch tickets from HubSpot CRM v3 objects API with basic pagination."""
-        await self._inject_auth_header()
-        tickets: list[dict[str, Any]] = []
-
-        params = {
-            "limit": 100,
-            "properties": ",".join(TICKET_PROPERTIES),
-        }
-        if after:
-            # HubSpot uses filter groups in POST request for updated_after; skip for now.
-            pass
-
-        after_cursor: str | None = None
-        while True:
-            if after_cursor:
-                params["after"] = after_cursor
-
-            resp = await self._client.get("/crm/v3/objects/tickets", params=params)
-            resp.raise_for_status()
-            data = resp.json()
-
-            tickets.extend(data.get("results", []))
-
-            paging = data.get("paging")
-            if paging and paging.get("next"):
-                after_cursor = paging["next"]["after"]
-            else:
+        async for session in get_db():
+            try:
+                client = await self._get_client(session)
+                r = await client.get("/integrations/v1/me")
+                return r.status_code == 200
+            except (httpx.HTTPError, ValueError):
+                return False
+            finally:
                 break
+        return False
 
-        return tickets
+    async def sync_incremental(self, since: Optional[dt.datetime] = None) -> Dict[str, Any]:
+        """Sync only changes since last sync or specified time."""
+        async for session in get_db():
+            return await self._sync_with_tracking(session, "incremental", since)
 
-    # ------------------------------------------------------------------
-    # OAuth helpers (called from API router)
-    # ------------------------------------------------------------------
+    async def sync_full(self) -> Dict[str, Any]:
+        """Perform full sync of all tickets."""
+        async for session in get_db():
+            return await self._sync_with_tracking(session, "full")
 
-    async def exchange_code_for_tokens(self, code: str) -> None:
-        """Exchange an OAuth authorization code for tokens and persist them."""
-        if not self._client_id or not self._client_secret:
-            raise RuntimeError("HubSpot OAuth client credentials missing.")
+    async def _sync_with_tracking(
+        self, 
+        session: AsyncSession, 
+        sync_type: str, 
+        since: Optional[dt.datetime] = None
+    ) -> Dict[str, Any]:
+        """Sync with comprehensive tracking and error handling."""
+        sync_event = SyncEvent(
+            tenant_id=self.tenant_id,
+            integration_id=self.integration_id,
+            event_type=sync_type,
+            status="running",
+            started_at=dt.datetime.utcnow()
+        )
+        session.add(sync_event)
+        await session.commit()
+        
+        start_time = time.time()
+        
+        try:
+            # Get last sync time if not specified
+            if since is None and sync_type == "incremental":
+                integration = await session.get(TenantIntegration, self.integration_id)
+                since = integration.last_synced_at
+            
+            # Fetch tickets
+            tickets = await self._fetch_tickets(since)
+            
+            # Transform and upsert
+            issue_dicts = []
+            for ticket in tickets:
+                issue_dict = self._transform_ticket_to_issue(ticket)
+                issue_dicts.append(issue_dict)
+            
+            if issue_dicts:
+                await upsert_many(session, issue_dicts)
+            
+            # Update sync event
+            duration = int(time.time() - start_time)
+            sync_event.status = "success"
+            sync_event.completed_at = dt.datetime.utcnow()
+            sync_event.duration_seconds = duration
+            sync_event.items_processed = len(tickets)
+            sync_event.items_updated = len(issue_dicts)
+            
+            # Update integration last_synced_at
+            integration = await session.get(TenantIntegration, self.integration_id)
+            integration.last_synced_at = dt.datetime.utcnow()
+            integration.last_sync_status = "success"
+            integration.sync_error_message = None
+            
+            await session.commit()
+            
+            return {
+                "success": True,
+                "processed": len(tickets),
+                "updated": len(issue_dicts),
+                "duration_seconds": duration
+            }
+            
+        except Exception as e:
+            # Update sync event with error
+            duration = int(time.time() - start_time)
+            sync_event.status = "failed"
+            sync_event.completed_at = dt.datetime.utcnow()
+            sync_event.duration_seconds = duration
+            sync_event.error_message = str(e)
+            
+            # Update integration error state
+            integration = await session.get(TenantIntegration, self.integration_id)
+            integration.last_sync_status = "failed"
+            integration.sync_error_message = str(e)
+            
+            await session.commit()
+            
+            raise
 
-        data = {
-            "grant_type": "authorization_code",
-            "client_id": self._client_id,
-            "client_secret": self._client_secret,
-            "redirect_uri": os.getenv("HUBSPOT_REDIRECT_URI"),
-            "code": code,
+    def _transform_ticket_to_issue(self, ticket: Dict[str, Any]) -> Dict[str, Any]:
+        """Transform HubSpot ticket to internal issue format."""
+        props = ticket.get("properties", {})
+        
+        return {
+            "id": uuid.uuid5(uuid.NAMESPACE_URL, f"hubspot-{ticket['id']}"),
+            "tenant_id": self.tenant_id,
+            "hubspot_ticket_id": str(ticket["id"]),
+            "title": props.get("subject") or f"Ticket {ticket['id']}",
+            "description": props.get("content"),
+            "source": "hubspot",
+            "severity": self._calculate_severity(props),
+            "frequency": self._calculate_frequency(props),
+            "status": props.get("hs_pipeline_stage"),
+            "type": props.get("hs_ticket_category"),
+            "tags": props.get("hs_ticket_priority"),
         }
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.hubapi.com/oauth/v1/token",
-                data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+    def _calculate_severity(self, props: Dict[str, Any]) -> Optional[int]:
+        """Calculate issue severity based on HubSpot ticket properties."""
+        priority = props.get("hs_ticket_priority", "").lower()
+        
+        severity_map = {
+            "urgent": 5,
+            "high": 4,
+            "medium": 3,
+            "low": 2,
+            "": 1
+        }
+        
+        return severity_map.get(priority, 1)
+
+    def _calculate_frequency(self, props: Dict[str, Any]) -> Optional[int]:
+        """Calculate issue frequency based on ticket properties."""
+        # This could be enhanced with more sophisticated logic
+        # For now, return None as frequency calculation requires historical data
+        return None
+
+    async def _fetch_tickets(
+        self, 
+        since: Optional[dt.datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch tickets from HubSpot with optional time filtering."""
+        async for session in get_db():
+            client = await self._get_client(session)
+            tickets = []
+            
+            params = {
+                "limit": 100,
+                "properties": ",".join(TICKET_PROPERTIES),
+            }
+            
+            # Add time filter if specified
+            if since:
+                # HubSpot uses milliseconds timestamp
+                since_ms = int(since.timestamp() * 1000)
+                # Note: HubSpot v3 API filtering is done via POST request
+                # For simplicity, we'll fetch all and filter client-side for now
+                pass
+            
+            after_cursor: Optional[str] = None
+            while True:
+                if after_cursor:
+                    params["after"] = after_cursor
+                
+                resp = await client.get("/crm/v3/objects/tickets", params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                results = data.get("results", [])
+                
+                # Filter by time if needed
+                if since:
+                    filtered_results = []
+                    for ticket in results:
+                        props = ticket.get("properties", {})
+                        last_modified = props.get("hs_lastmodifieddate")
+                        if last_modified:
+                            # Parse HubSpot timestamp
+                            try:
+                                ticket_time = dt.datetime.fromtimestamp(
+                                    int(last_modified) / 1000
+                                )
+                                if ticket_time >= since:
+                                    filtered_results.append(ticket)
+                            except (ValueError, TypeError):
+                                # If we can't parse the timestamp, include it
+                                filtered_results.append(ticket)
+                    results = filtered_results
+                
+                tickets.extend(results)
+                
+                paging = data.get("paging")
+                if paging and paging.get("next"):
+                    after_cursor = paging["next"]["after"]
+                else:
+                    break
+            
+            return tickets
+
+    async def process_webhook(self, webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process incoming HubSpot webhook for real-time updates."""
+        async for session in get_db():
+            # Verify webhook signature (implement security)
+            # Extract changed ticket IDs
+            ticket_ids = self._extract_ticket_ids_from_webhook(webhook_data)
+            
+            if not ticket_ids:
+                return {"success": True, "processed": 0}
+            
+            # Fetch specific tickets that changed
+            client = await self._get_client(session)
+            tickets = []
+            
+            for ticket_id in ticket_ids:
+                try:
+                    resp = await client.get(f"/crm/v3/objects/tickets/{ticket_id}")
+                    if resp.status_code == 200:
+                        tickets.append(resp.json())
+                except httpx.HTTPError:
+                    continue
+            
+            # Transform and upsert
+            issue_dicts = [self._transform_ticket_to_issue(t) for t in tickets]
+            
+            if issue_dicts:
+                await upsert_many(session, issue_dicts)
+            
+            # Create sync event for webhook
+            sync_event = SyncEvent(
+                tenant_id=self.tenant_id,
+                integration_id=self.integration_id,
+                event_type="webhook",
+                status="success",
+                items_processed=len(tickets),
+                items_updated=len(issue_dicts),
+                completed_at=dt.datetime.utcnow(),
+                source_data=webhook_data
             )
-            resp.raise_for_status()
+            session.add(sync_event)
+            await session.commit()
+            
+            return {
+                "success": True,
+                "processed": len(tickets),
+                "updated": len(issue_dicts)
+            }
 
-        payload = resp.json()
+    def _extract_ticket_ids_from_webhook(self, webhook_data: Dict[str, Any]) -> List[str]:
+        """Extract ticket IDs from HubSpot webhook payload."""
+        ticket_ids = []
+        
+        # HubSpot webhook structure varies by event type
+        # This is a simplified extraction
+        if "subscriptionType" in webhook_data:
+            if webhook_data["subscriptionType"] == "contact.propertyChange":
+                # Handle contact property changes
+                pass
+            elif webhook_data["subscriptionType"] == "ticket.propertyChange":
+                # Handle ticket property changes
+                ticket_id = webhook_data.get("objectId")
+                if ticket_id:
+                    ticket_ids.append(str(ticket_id))
+        
+        return ticket_ids
 
-        from app.services import token_service  # local import
 
-        async for session in get_db():  # type: AsyncGenerator
-            await token_service.save_or_update(
-                session=session,
-                provider="hubspot",
-                access_token=payload["access_token"],
-                refresh_token=payload["refresh_token"],
-                expires_in=payload["expires_in"],
-            )
-            break
-
-
-# Singleton instance used by routers
-hubspot_service = HubSpotService() 
+# Factory function for creating tenant-specific services
+def create_hubspot_service(tenant_id: UUID, integration_id: UUID) -> HubSpotService:
+    """Create a HubSpot service instance for a specific tenant."""
+    return HubSpotService(tenant_id, integration_id) 

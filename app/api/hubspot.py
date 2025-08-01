@@ -224,7 +224,7 @@ async def create_hubspot_integration(
 async def hubspot_authorize_url(
     tenant_id: UUID,
     session: AsyncSession = Depends(get_db)
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """Generate HubSpot OAuth authorization URL for a tenant."""
     try:
         import urllib.parse as up

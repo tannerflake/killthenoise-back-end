@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-from typing import Any, List, AsyncGenerator
+import time
+import uuid
+from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 import httpx
-import uuid
-
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.models.sync_event import SyncEvent
+from app.models.tenant_integration import TenantIntegration
 from app.services.issue_service import upsert_many
 
 # Base HubSpot API URL (v3 CRM + misc legacy endpoints)
@@ -21,174 +25,304 @@ TICKET_PROPERTIES = [
     "hs_lastmodifieddate",
     "hs_pipeline_stage",
     "hs_ticket_priority",
+    "hs_createdate",
+    "hs_ticket_category",
+    "hs_resolution",
 ]
 
 
 class HubSpotService:
-    """Minimal async wrapper around HubSpot REST API.
+    """Multi-tenant HubSpot API service with reliable token management."""
 
-    For now we support a simple connectivity check and ticket sync skeleton.
-    Later we will extend this class with OAuth refresh, incremental paging, etc.
-    """
+    def __init__(self, tenant_id: UUID, integration_id: UUID) -> None:
+        self.tenant_id = tenant_id
+        self.integration_id = integration_id
+        self._client: Optional[httpx.AsyncClient] = None
+        self._access_token: Optional[str] = None
 
-    def __init__(self) -> None:
-        """Create bare client; token headers are injected dynamically."""
+    async def _get_integration(self, session: AsyncSession) -> TenantIntegration:
+        """Get the tenant integration record."""
+        stmt = select(TenantIntegration).where(
+            TenantIntegration.id == self.integration_id,
+            TenantIntegration.tenant_id == self.tenant_id,
+            TenantIntegration.integration_type == "hubspot"
+        )
+        result = await session.execute(stmt)
+        integration = result.scalar_one_or_none()
 
-        self._client = httpx.AsyncClient(base_url=HUBSPOT_BASE_URL, timeout=30)
+        if not integration or not integration.is_active:
+            raise ValueError(f"HubSpot integration {self.integration_id} not found or inactive for tenant {self.tenant_id}")
 
-        # OAuth app credentials (static)
-        self._client_id: str | None = os.getenv("HUBSPOT_CLIENT_ID")
-        self._client_secret: str | None = os.getenv("HUBSPOT_CLIENT_SECRET")
+        return integration
 
-        if not self._client_id or not self._client_secret:
-            raise RuntimeError("HUBSPOT_CLIENT_ID and HUBSPOT_CLIENT_SECRET must be set.")
-
-    # ------------------------------------------------------------------
-    # Internal helpers for token management
-    # ------------------------------------------------------------------
-
-    async def _inject_auth_header(self) -> None:
-        """Ensure we have a valid access token and set it on the httpx client."""
-        from app.services import token_service  # local import to avoid cycles
-
-        async for session in get_db():
-            access_token = await token_service.get_valid_access_token(
-                session=session,
-                provider="hubspot",
-                client_id=self._client_id,
-                client_secret=self._client_secret,
-            )
-            break
-
-        if not access_token:
-            raise RuntimeError(
-                "No HubSpot access token available. Complete OAuth flow first."
-            )
-
-        self._client.headers["Authorization"] = f"Bearer {access_token}"
-
-    # ---------------------------------------------------------------------
-    # Public helpers
-    # ---------------------------------------------------------------------
-
-    async def status(self) -> bool:
-        """Return True when credentials are valid and HubSpot API responds."""
-        await self._inject_auth_header()
+    async def _validate_token(self, token: str) -> bool:
+        """Validate if a token is still valid using HubSpot's introspection endpoint."""
         try:
-            r = await self._client.get("/integrations/v1/me")
-            return r.status_code == 200
-        except httpx.HTTPError:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{HUBSPOT_BASE_URL}/oauth/v1/access-tokens/{token}",
+                    timeout=10
+                )
+                return response.status_code == 200
+        except Exception:
             return False
 
-    async def sync(self) -> None:
-        """Background job placeholder that will fetch & upsert tickets."""
-        # TODO: determine last sync timestamp (store in DB / cache)
-        # last_synced_at = await self._get_last_synced_at()
+    async def _get_valid_token(self, session: AsyncSession) -> str:
+        """Get a valid access token for this tenant, validating it first."""
+        integration = await self._get_integration(session)
+        
+        # Get token from integration config
+        access_token = integration.config.get("access_token")
+        if not access_token:
+            raise ValueError(f"No HubSpot access token configured for tenant {self.tenant_id}")
 
-        tickets: List[dict[str, Any]] = await self._fetch_tickets()
+        # Validate the token
+        if not await self._validate_token(access_token):
+            # Mark integration as having sync issues
+            integration.last_sync_status = "failed"
+            integration.sync_error_message = "Invalid or expired access token"
+            await session.commit()
+            raise ValueError(f"Invalid or expired HubSpot access token for tenant {self.tenant_id}")
 
-        issue_dicts: List[dict[str, Any]] = []
-        for t in tickets:
-            props = t.get("properties", {})
-            issue_dicts.append(
-                {
-                    "hubspot_ticket_id": str(t["id"]),
-                    "id": uuid.uuid5(uuid.NAMESPACE_URL, f"hubspot-{t['id']}").hex,
-                    "title": props.get("subject") or f"Ticket {t['id']}",
-                    "description": props.get("content"),
-                    "source": "hubspot",
-                    "severity": None,
-                    "frequency": None,
-                    "status": props.get("hs_pipeline_stage"),
-                    "type": None,
-                    "tags": props.get("hs_ticket_priority"),
+        self._access_token = access_token
+        return access_token
+
+    async def _get_client(self, session: AsyncSession) -> httpx.AsyncClient:
+        """Get configured HTTP client with validated token."""
+        if self._client is None:
+            token = await self._get_valid_token(session)
+            self._client = httpx.AsyncClient(
+                base_url=HUBSPOT_BASE_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+        return self._client
+
+    async def test_connection(self) -> Dict[str, Any]:
+        """Test connection to HubSpot and return detailed status."""
+        async for session in get_db():
+            try:
+                client = await self._get_client(session)
+                
+                # Test with token introspection endpoint
+                if self._access_token:
+                    response = await client.get(f"/oauth/v1/access-tokens/{self._access_token}")
+                    if response.status_code == 200:
+                        token_info = response.json()
+                        return {
+                            "connected": True,
+                            "hub_domain": token_info.get("hub_domain"),
+                            "scopes": token_info.get("scopes", []),
+                            "token_type": token_info.get("token_type"),
+                            "expires_in": token_info.get("expires_in")
+                        }
+                
+                # Fallback: try a simple tickets API call
+                response = await client.get("/crm/v3/objects/tickets", params={"limit": 1})
+                return {
+                    "connected": response.status_code == 200,
+                    "fallback_test": True
                 }
-            )
-
-        if not issue_dicts:
-            return
-
-        async for session in get_db():  # type: AsyncGenerator
-            await upsert_many(session, issue_dicts)
-            break
-
-        print(f"[HubSpotService] Synced {len(issue_dicts)} HubSpot tickets → issues.")
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _fetch_tickets(self, after: dt.datetime | None = None) -> List[dict[str, Any]]:
-        """Fetch tickets from HubSpot CRM v3 objects API with basic pagination."""
-        await self._inject_auth_header()
-        tickets: list[dict[str, Any]] = []
-
-        params = {
-            "limit": 100,
-            "properties": ",".join(TICKET_PROPERTIES),
-        }
-        if after:
-            # HubSpot uses filter groups in POST request for updated_after; skip for now.
-            pass
-
-        after_cursor: str | None = None
-        while True:
-            if after_cursor:
-                params["after"] = after_cursor
-
-            resp = await self._client.get("/crm/v3/objects/tickets", params=params)
-            resp.raise_for_status()
-            data = resp.json()
-
-            tickets.extend(data.get("results", []))
-
-            paging = data.get("paging")
-            if paging and paging.get("next"):
-                after_cursor = paging["next"]["after"]
-            else:
+                
+            except Exception as e:
+                return {
+                    "connected": False,
+                    "error": str(e)
+                }
+            finally:
                 break
+        
+        return {"connected": False, "error": "Unable to get database session"}
 
-        return tickets
+    async def list_tickets(self, limit: Optional[int] = None) -> Dict[str, Any]:
+        """List all tickets for this tenant from HubSpot."""
+        async for session in get_db():
+            try:
+                client = await self._get_client(session)
+                all_tickets = []
+                
+                params = {
+                    "limit": min(limit or 100, 100),  # Max 100 per page
+                    "properties": ",".join(TICKET_PROPERTIES)
+                }
+                
+                after_cursor = None
+                total_fetched = 0
+                
+                while True:
+                    if after_cursor:
+                        params["after"] = after_cursor
+                    
+                    response = await client.get("/crm/v3/objects/tickets", params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    results = data.get("results", [])
+                    all_tickets.extend(results)
+                    total_fetched += len(results)
+                    
+                    # Check if we've reached the limit
+                    if limit and total_fetched >= limit:
+                        all_tickets = all_tickets[:limit]
+                        break
+                    
+                    # Check for more pages
+                    paging = data.get("paging")
+                    if paging and paging.get("next"):
+                        after_cursor = paging["next"]["after"]
+                    else:
+                        break
+                
+                return {
+                    "success": True,
+                    "tickets": all_tickets,
+                    "total_count": len(all_tickets),
+                    "tenant_id": str(self.tenant_id)
+                }
+                
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "tenant_id": str(self.tenant_id)
+                }
+            finally:
+                break
+        
+        return {"success": False, "error": "Unable to get database session"}
 
-    # ------------------------------------------------------------------
-    # OAuth helpers (called from API router)
-    # ------------------------------------------------------------------
+    async def sync_full(self) -> Dict[str, Any]:
+        """Perform full sync of all tickets with tracking."""
+        async for session in get_db():
+            return await self._sync_with_tracking(session, "full")
 
-    async def exchange_code_for_tokens(self, code: str) -> None:
-        """Exchange an OAuth authorization code for tokens and persist them."""
-        if not self._client_id or not self._client_secret:
-            raise RuntimeError("HubSpot OAuth client credentials missing.")
+    async def sync_incremental(self, since: Optional[dt.datetime] = None) -> Dict[str, Any]:
+        """Sync only changes since last sync or specified time."""
+        async for session in get_db():
+            return await self._sync_with_tracking(session, "incremental", since)
 
-        data = {
-            "grant_type": "authorization_code",
-            "client_id": self._client_id,
-            "client_secret": self._client_secret,
-            "redirect_uri": os.getenv("HUBSPOT_REDIRECT_URI"),
-            "code": code,
+    async def _sync_with_tracking(
+        self, session: AsyncSession, sync_type: str, since: Optional[dt.datetime] = None
+    ) -> Dict[str, Any]:
+        """Sync with comprehensive tracking and error handling."""
+        sync_event = SyncEvent(
+            tenant_id=self.tenant_id,
+            integration_id=self.integration_id,
+            event_type=sync_type,
+            status="running",
+            started_at=dt.datetime.utcnow(),
+        )
+        session.add(sync_event)
+        await session.commit()
+
+        start_time = time.time()
+
+        try:
+            # Get last sync time if not specified
+            if since is None and sync_type == "incremental":
+                integration = await session.get(TenantIntegration, self.integration_id)
+                since = integration.last_synced_at
+
+            # Fetch tickets using our reliable method
+            tickets_result = await self.list_tickets()
+            
+            if not tickets_result.get("success"):
+                raise ValueError(f"Failed to fetch tickets: {tickets_result.get('error')}")
+            
+            tickets = tickets_result.get("tickets", [])
+
+            # Transform and upsert
+            issue_dicts = []
+            for ticket in tickets:
+                issue_dict = self._transform_ticket_to_issue(ticket)
+                issue_dicts.append(issue_dict)
+
+            if issue_dicts:
+                await upsert_many(session, issue_dicts)
+
+            # Update sync event
+            duration = int(time.time() - start_time)
+            sync_event.status = "success"
+            sync_event.completed_at = dt.datetime.utcnow()
+            sync_event.duration_seconds = duration
+            sync_event.items_processed = len(tickets)
+            sync_event.items_updated = len(issue_dicts)
+
+            # Update integration last_synced_at
+            integration = await session.get(TenantIntegration, self.integration_id)
+            integration.last_synced_at = dt.datetime.utcnow()
+            integration.last_sync_status = "success"
+            integration.sync_error_message = None
+
+            await session.commit()
+
+            return {
+                "success": True,
+                "processed": len(tickets),
+                "updated": len(issue_dicts),
+                "duration_seconds": duration,
+                "tenant_id": str(self.tenant_id)
+            }
+
+        except Exception as e:
+            # Update sync event with error
+            duration = int(time.time() - start_time)
+            sync_event.status = "failed"
+            sync_event.completed_at = dt.datetime.utcnow()
+            sync_event.duration_seconds = duration
+            sync_event.error_message = str(e)
+
+            # Update integration error state
+            integration = await session.get(TenantIntegration, self.integration_id)
+            integration.last_sync_status = "failed"
+            integration.sync_error_message = str(e)
+
+            await session.commit()
+
+            return {
+                "success": False,
+                "error": str(e),
+                "tenant_id": str(self.tenant_id)
+            }
+
+    def _transform_ticket_to_issue(self, ticket: Dict[str, Any]) -> Dict[str, Any]:
+        """Transform HubSpot ticket to internal issue format."""
+        props = ticket.get("properties", {})
+
+        return {
+            "id": uuid.uuid5(uuid.NAMESPACE_URL, f"hubspot-{ticket['id']}"),
+            "tenant_id": self.tenant_id,
+            "hubspot_ticket_id": str(ticket["id"]),
+            "title": props.get("subject") or f"Ticket {ticket['id']}",
+            "description": props.get("content"),
+            "source": "hubspot",
+            "severity": self._calculate_severity(props),
+            "frequency": self._calculate_frequency(props),
+            "status": props.get("hs_pipeline_stage"),
+            "type": props.get("hs_ticket_category"),
+            "tags": props.get("hs_ticket_priority"),
         }
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.hubapi.com/oauth/v1/token",
-                data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp.raise_for_status()
+    def _calculate_severity(self, props: Dict[str, Any]) -> Optional[int]:
+        """Calculate issue severity based on HubSpot ticket properties."""
+        priority = props.get("hs_ticket_priority", "").lower()
+        severity_map = {"urgent": 5, "high": 4, "medium": 3, "low": 2, "": 1}
+        return severity_map.get(priority, 1)
 
-        payload = resp.json()
+    def _calculate_frequency(self, props: Dict[str, Any]) -> Optional[int]:
+        """Calculate issue frequency based on ticket properties."""
+        # This could be enhanced with more sophisticated logic
+        # For now, return None as frequency calculation requires historical data
+        return None
 
-        from app.services import token_service  # local import
-
-        async for session in get_db():  # type: AsyncGenerator
-            await token_service.save_or_update(
-                session=session,
-                provider="hubspot",
-                access_token=payload["access_token"],
-                refresh_token=payload["refresh_token"],
-                expires_in=payload["expires_in"],
-            )
-            break
+    async def close(self):
+        """Clean up resources."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
 
-# Singleton instance used by routers
-hubspot_service = HubSpotService() 
+# Factory function for creating tenant-specific services
+def create_hubspot_service(tenant_id: UUID, integration_id: UUID) -> HubSpotService:
+    """Create a HubSpot service instance for a specific tenant."""
+    return HubSpotService(tenant_id, integration_id)

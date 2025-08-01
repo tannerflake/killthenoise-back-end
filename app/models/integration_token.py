@@ -19,4 +19,4 @@ class IntegrationToken(Base):
     created_at = Column(DateTime(timezone=True), default=dt.datetime.utcnow)
     updated_at = Column(
         DateTime(timezone=True), default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow
-    ) 
+    )

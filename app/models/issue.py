@@ -13,7 +13,6 @@ class Issue(Base):
     __tablename__ = "issues"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     title = Column(String, nullable=False)
     description = Column(String, nullable=True)
     source = Column(String, nullable=False)
@@ -29,10 +28,10 @@ class Issue(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    # Composite indexes for common queries
+    # Indexes for common queries
     __table_args__ = (
-        Index("ix_issues_tenant_source", "tenant_id", "source"),
-        Index("ix_issues_tenant_severity", "tenant_id", "severity"),
-        Index("ix_issues_tenant_status", "tenant_id", "status"),
-        Index("ix_issues_tenant_created", "tenant_id", "created_at"),
+        Index("ix_issues_source", "source"),
+        Index("ix_issues_severity", "severity"),
+        Index("ix_issues_status", "status"),
+        Index("ix_issues_created", "created_at"),
     )

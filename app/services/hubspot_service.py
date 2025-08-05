@@ -40,7 +40,7 @@ class HubSpotService:
         self._client: Optional[httpx.AsyncClient] = None
         self._access_token: Optional[str] = None
 
-    async def _get_integration(self, session: AsyncSession) -> TenantIntegration:
+    async def _get_integration(self, session: AsyncSession, require_active: bool = False) -> TenantIntegration:
         """Get the tenant integration record."""
         stmt = select(TenantIntegration).where(
             TenantIntegration.id == self.integration_id,
@@ -50,10 +50,17 @@ class HubSpotService:
         result = await session.execute(stmt)
         integration = result.scalar_one_or_none()
 
-        if not integration or not integration.is_active:
-            raise ValueError(f"HubSpot integration {self.integration_id} not found or inactive for tenant {self.tenant_id}")
+        if not integration:
+            raise ValueError(f"HubSpot integration {self.integration_id} not found for tenant {self.tenant_id}")
+        
+        if require_active and not integration.is_active:
+            raise ValueError(f"HubSpot integration {self.integration_id} is inactive for tenant {self.tenant_id}")
 
         return integration
+
+    async def _get_active_integration(self, session: AsyncSession) -> TenantIntegration:
+        """Get the active tenant integration record for operations that require tokens."""
+        return await self._get_integration(session, require_active=True)
 
     async def _validate_token(self, token: str) -> bool:
         """Validate if a token is still valid using HubSpot's introspection endpoint."""
@@ -69,7 +76,7 @@ class HubSpotService:
 
     async def _get_valid_token(self, session: AsyncSession) -> str:
         """Get a valid access token for this tenant, validating it first."""
-        integration = await self._get_integration(session)
+        integration = await self._get_active_integration(session)
         
         # Get token from integration config
         access_token = integration.config.get("access_token")
@@ -98,98 +105,120 @@ class HubSpotService:
             )
         return self._client
 
-    async def test_connection(self) -> Dict[str, Any]:
+    async def test_connection(self, session: AsyncSession) -> Dict[str, Any]:
         """Test connection to HubSpot and return detailed status."""
-        async for session in get_db():
-            try:
-                client = await self._get_client(session)
-                
-                # Test with token introspection endpoint
-                if self._access_token:
-                    response = await client.get(f"/oauth/v1/access-tokens/{self._access_token}")
-                    if response.status_code == 200:
-                        token_info = response.json()
-                        return {
-                            "connected": True,
-                            "hub_domain": token_info.get("hub_domain"),
-                            "scopes": token_info.get("scopes", []),
-                            "token_type": token_info.get("token_type"),
-                            "expires_in": token_info.get("expires_in")
-                        }
-                
-                # Fallback: try a simple tickets API call
-                response = await client.get("/crm/v3/objects/tickets", params={"limit": 1})
-                return {
-                    "connected": response.status_code == 200,
-                    "fallback_test": True
-                }
-                
-            except Exception as e:
+        try:
+            # First, get the integration (can be inactive)
+            integration = await self._get_integration(session, require_active=False)
+            
+            # If integration is inactive, return status without trying to connect
+            if not integration.is_active:
                 return {
                     "connected": False,
-                    "error": str(e)
+                    "integration_status": "inactive",
+                    "message": "Integration exists but is not active. Complete OAuth flow to activate.",
+                    "integration_id": str(integration.id),
+                    "tenant_id": str(self.tenant_id)
                 }
-            finally:
-                break
-        
-        return {"connected": False, "error": "Unable to get database session"}
+            
+            # If no access token configured, return appropriate status
+            if not integration.config.get("access_token"):
+                return {
+                    "connected": False,
+                    "integration_status": "active_no_token",
+                    "message": "Integration is active but no access token configured.",
+                    "integration_id": str(integration.id),
+                    "tenant_id": str(self.tenant_id)
+                }
+            
+            # Try to get client and test connection
+            client = await self._get_client(session)
+            
+            # Test with token introspection endpoint
+            if self._access_token:
+                response = await client.get(f"/oauth/v1/access-tokens/{self._access_token}")
+                if response.status_code == 200:
+                    token_info = response.json()
+                    return {
+                        "connected": True,
+                        "integration_status": "active_connected",
+                        "hub_domain": token_info.get("hub_domain"),
+                        "scopes": token_info.get("scopes", []),
+                        "token_type": token_info.get("token_type"),
+                        "expires_in": token_info.get("expires_in"),
+                        "integration_id": str(integration.id),
+                        "tenant_id": str(self.tenant_id)
+                    }
+            
+            # Fallback: try a simple tickets API call
+            response = await client.get("/crm/v3/objects/tickets", params={"limit": 1})
+            return {
+                "connected": response.status_code == 200,
+                "integration_status": "active_connected",
+                "fallback_test": True,
+                "integration_id": str(integration.id),
+                "tenant_id": str(self.tenant_id)
+            }
+            
+        except Exception as e:
+            return {
+                "connected": False,
+                "error": str(e),
+                "integration_id": str(self.integration_id),
+                "tenant_id": str(self.tenant_id)
+            }
 
-    async def list_tickets(self, limit: Optional[int] = None) -> Dict[str, Any]:
+    async def list_tickets(self, session: AsyncSession, limit: Optional[int] = None) -> Dict[str, Any]:
         """List all tickets for this tenant from HubSpot."""
-        async for session in get_db():
-            try:
-                client = await self._get_client(session)
-                all_tickets = []
+        try:
+            client = await self._get_client(session)
+            all_tickets = []
+            
+            params = {
+                "limit": min(limit or 100, 100),  # Max 100 per page
+                "properties": ",".join(TICKET_PROPERTIES)
+            }
+            
+            after_cursor = None
+            total_fetched = 0
+            
+            while True:
+                if after_cursor:
+                    params["after"] = after_cursor
                 
-                params = {
-                    "limit": min(limit or 100, 100),  # Max 100 per page
-                    "properties": ",".join(TICKET_PROPERTIES)
-                }
+                response = await client.get("/crm/v3/objects/tickets", params=params)
+                response.raise_for_status()
+                data = response.json()
                 
-                after_cursor = None
-                total_fetched = 0
+                results = data.get("results", [])
+                all_tickets.extend(results)
+                total_fetched += len(results)
                 
-                while True:
-                    if after_cursor:
-                        params["after"] = after_cursor
-                    
-                    response = await client.get("/crm/v3/objects/tickets", params=params)
-                    response.raise_for_status()
-                    data = response.json()
-                    
-                    results = data.get("results", [])
-                    all_tickets.extend(results)
-                    total_fetched += len(results)
-                    
-                    # Check if we've reached the limit
-                    if limit and total_fetched >= limit:
-                        all_tickets = all_tickets[:limit]
-                        break
-                    
-                    # Check for more pages
-                    paging = data.get("paging")
-                    if paging and paging.get("next"):
-                        after_cursor = paging["next"]["after"]
-                    else:
-                        break
+                # Check if we've reached the limit
+                if limit and total_fetched >= limit:
+                    all_tickets = all_tickets[:limit]
+                    break
                 
-                return {
-                    "success": True,
-                    "tickets": all_tickets,
-                    "total_count": len(all_tickets),
-                    "tenant_id": str(self.tenant_id)
-                }
-                
-            except Exception as e:
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "tenant_id": str(self.tenant_id)
-                }
-            finally:
-                break
-        
-        return {"success": False, "error": "Unable to get database session"}
+                # Check for more pages
+                paging = data.get("paging")
+                if paging and paging.get("next"):
+                    after_cursor = paging["next"]["after"]
+                else:
+                    break
+            
+            return {
+                "success": True,
+                "tickets": all_tickets,
+                "total_count": len(all_tickets),
+                "tenant_id": str(self.tenant_id)
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "tenant_id": str(self.tenant_id)
+            }
 
     async def sync_full(self) -> Dict[str, Any]:
         """Perform full sync of all tickets with tracking."""
@@ -224,7 +253,7 @@ class HubSpotService:
                 since = integration.last_synced_at
 
             # Fetch tickets using our reliable method
-            tickets_result = await self.list_tickets()
+            tickets_result = await self.list_tickets(session)
             
             if not tickets_result.get("success"):
                 raise ValueError(f"Failed to fetch tickets: {tickets_result.get('error')}")

@@ -4,7 +4,7 @@ import os
 from typing import Dict, List, Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -27,7 +27,7 @@ async def hubspot_status(
     """Test HubSpot connection status for a specific tenant integration."""
     try:
         service = create_hubspot_service(tenant_id, integration_id)
-        result = await service.test_connection()
+        result = await service.test_connection(session)
         await service.close()
         return result
     except Exception as e:
@@ -44,7 +44,7 @@ async def list_hubspot_tickets(
     """List all HubSpot tickets for a specific tenant integration."""
     try:
         service = create_hubspot_service(tenant_id, integration_id)
-        result = await service.list_tickets(limit=limit)
+        result = await service.list_tickets(session, limit=limit)
         await service.close()
         return result
     except Exception as e:
@@ -66,7 +66,7 @@ async def hubspot_sync(
     try:
         # Test connection first
         service = create_hubspot_service(tenant_id, integration_id)
-        connection_test = await service.test_connection()
+        connection_test = await service.test_connection(session)
         
         if not connection_test.get("connected"):
             await service.close()
@@ -150,7 +150,7 @@ async def list_hubspot_integrations(
             # Test connection status
             try:
                 service = create_hubspot_service(tenant_id, integration.id)
-                status = await service.test_connection()
+                status = await service.test_connection(session)
                 integration_data["connection_status"] = status
                 await service.close()
             except Exception as e:
@@ -247,7 +247,8 @@ async def hubspot_authorize_url(
         if not client_id or not redirect_uri:
             raise HTTPException(status_code=500, detail="HubSpot OAuth credentials not configured")
         
-        scope = "oauth%20tickets"
+        # Use correct HubSpot scopes for ticket access
+        scope = "tickets"
         state = f"{tenant_id}:{integration.id}"
         
         qs = up.urlencode({
@@ -270,12 +271,12 @@ async def hubspot_authorize_url(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/oauth/callback")
+@router.get("/oauth/callback")
 async def hubspot_oauth_callback(
     code: str, 
     state: str,
     session: AsyncSession = Depends(get_db)
-) -> Dict[str, Any]:
+) -> Response:
     """Handle OAuth callback and exchange code for access token."""
     try:
         import httpx
@@ -334,15 +335,59 @@ async def hubspot_oauth_callback(
         
         await service.close()
         
-        return {
-            "success": True,
-            "integration_id": str(integration_id),
-            "tenant_id": str(tenant_id),
-            "message": "HubSpot integration activated successfully"
-        }
+        # Return HTML redirect to success page
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>HubSpot Integration Success</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                .success {{ color: #28a745; font-size: 24px; margin-bottom: 20px; }}
+                .details {{ color: #666; margin-bottom: 30px; }}
+                .close {{ background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }}
+            </style>
+        </head>
+        <body>
+            <div class="success">✅ HubSpot Integration Successful!</div>
+            <div class="details">
+                <p>Your HubSpot integration has been activated successfully.</p>
+                <p><strong>Integration ID:</strong> {integration_id}</p>
+                <p><strong>Tenant ID:</strong> {tenant_id}</p>
+            </div>
+            <button class="close" onclick="window.close()">Close Window</button>
+        </body>
+        </html>
+        """
+        
+        return Response(content=html_content, media_type="text/html")
         
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Return error page
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>HubSpot Integration Error</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                .error {{ color: #dc3545; font-size: 24px; margin-bottom: 20px; }}
+                .details {{ color: #666; margin-bottom: 30px; }}
+                .close {{ background: #6c757d; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }}
+            </style>
+        </head>
+        <body>
+            <div class="error">❌ HubSpot Integration Failed</div>
+            <div class="details">
+                <p>There was an error activating your HubSpot integration.</p>
+                <p><strong>Error:</strong> {str(e)}</p>
+            </div>
+            <button class="close" onclick="window.close()">Close Window</button>
+        </body>
+        </html>
+        """
+        
+        return Response(content=html_content, media_type="text/html")
 
 
 # -------------------------------------------------------------------------

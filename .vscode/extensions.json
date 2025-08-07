@@ -1,0 +1,16 @@
+{
+    "recommendations": [
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "ms-python.flake8",
+        "ms-python.mypy-type-checker",
+        "ms-python.isort",
+        "ms-vscode.vscode-json",
+        "redhat.vscode-yaml",
+        "humao.rest-client",
+        "ms-python.debugpy",
+        "ms-toolsai.jupyter",
+        "donjayamanne.python-environment-manager",
+        "ms-python.vscode-pylance"
+    ]
+}

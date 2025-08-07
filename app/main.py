@@ -34,18 +34,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Create database tables if they don't exist and start scheduler."""
-
-    async def _create() -> None:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    try:
-        await _create()
-        print("[Startup] Database tables created successfully")
-    except Exception as exc:  # pragma: no cover
-        # Log but don't crash the app; handle outside if needed
-        print(f"[Startup] Failed to create tables: {exc!r}")
+    """Start scheduler and verify database connection."""
+    
+    # NOTE: Database tables are now managed by Alembic migrations
+    # Run 'alembic upgrade head' to create/update tables
+    print("[Startup] Using Alembic for database migrations")
 
     # Start the scheduler service
     try:

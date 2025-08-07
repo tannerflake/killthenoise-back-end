@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import time
 import uuid
@@ -18,6 +19,8 @@ from app.services.issue_service import upsert_many
 
 # Base HubSpot API URL (v3 CRM + misc legacy endpoints)
 HUBSPOT_BASE_URL = "https://api.hubapi.com"
+
+logger = logging.getLogger(__name__)
 
 TICKET_PROPERTIES = [
     "subject",
@@ -263,7 +266,7 @@ class HubSpotService:
             # Transform and upsert
             issue_dicts = []
             for ticket in tickets:
-                issue_dict = self._transform_ticket_to_issue(ticket)
+                issue_dict = await self._transform_ticket_to_issue(ticket)
                 issue_dicts.append(issue_dict)
 
             if issue_dicts:
@@ -314,11 +317,12 @@ class HubSpotService:
                 "tenant_id": str(self.tenant_id)
             }
 
-    def _transform_ticket_to_issue(self, ticket: Dict[str, Any]) -> Dict[str, Any]:
-        """Transform HubSpot ticket to internal issue format."""
+    async def _transform_ticket_to_issue(self, ticket: Dict[str, Any]) -> Dict[str, Any]:
+        """Transform HubSpot ticket to internal issue format with AI enhancement."""
         props = ticket.get("properties", {})
 
-        return {
+        # Basic ticket data
+        base_data = {
             "id": uuid.uuid5(uuid.NAMESPACE_URL, f"hubspot-{ticket['id']}"),
             "tenant_id": self.tenant_id,
             "hubspot_ticket_id": str(ticket["id"]),
@@ -331,6 +335,25 @@ class HubSpotService:
             "type": props.get("hs_ticket_category"),
             "tags": props.get("hs_ticket_priority"),
         }
+
+        # Enhance with AI analysis
+        try:
+            from app.services.ai_integration_service import create_ai_integration_service
+            
+            ai_service = create_ai_integration_service(self.tenant_id)
+            context = {
+                "priority": props.get("hs_ticket_priority"),
+                "category": props.get("hs_ticket_category"),
+                "source": "hubspot"
+            }
+            
+            enhanced_data = await ai_service.enhance_ticket_data(base_data, context)
+            await ai_service.close()
+            return enhanced_data
+            
+        except Exception as e:
+            logger.error(f"AI enhancement failed for ticket {ticket['id']}: {e}")
+            return base_data
 
     def _calculate_severity(self, props: Dict[str, Any]) -> Optional[int]:
         """Calculate issue severity based on HubSpot ticket properties."""

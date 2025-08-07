@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from typing import AsyncGenerator, Generator
 from unittest.mock import AsyncMock
@@ -14,8 +15,8 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base, get_db
 from app.main import app
 
-# Test database URL (in-memory SQLite for testing)
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# Test database URL (use test Supabase database)
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
 
 # Create test engine
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)

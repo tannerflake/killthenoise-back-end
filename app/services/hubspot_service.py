@@ -16,6 +16,7 @@ from app.db import get_db
 from app.models.sync_event import SyncEvent
 from app.models.tenant_integration import TenantIntegration
 from app.services.issue_service import upsert_many
+from app.services.ai_clustering_service import AIIssueClusteringService
 
 # Base HubSpot API URL (v3 CRM + misc legacy endpoints)
 HUBSPOT_BASE_URL = "https://api.hubapi.com"
@@ -271,6 +272,28 @@ class HubSpotService:
 
             if issue_dicts:
                 await upsert_many(session, issue_dicts)
+
+            # Ingest raw reports for AI grouping (v1)
+            try:
+                clustering = AIIssueClusteringService(self.tenant_id, session)
+                for ticket in tickets:
+                    props = ticket.get("properties", {})
+                    title = props.get("subject") or f"Ticket {ticket['id']}"
+                    body = props.get("content")
+                    await clustering.ingest_raw_report(
+                        source="hubspot",
+                        external_id=str(ticket["id"]),
+                        title=title,
+                        body=body,
+                        url=None,
+                        commit=False,  # Bulk insert without individual commits
+                    )
+                await session.commit()  # Commit all at once
+                # Rebuild groups incrementally
+                await clustering.recluster()
+            except Exception:
+                # Non-fatal for sync if AI grouping fails
+                pass
 
             # Update sync event
             duration = int(time.time() - start_time)

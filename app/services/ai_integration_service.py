@@ -97,6 +97,15 @@ class AIIntegrationService:
         if not updates.get("severity"):
             updates["severity"] = original_data.get("severity", 3)
 
+        # Ensure all AI fields have default values
+        updates.setdefault("ai_severity_confidence", 0.0)
+        updates.setdefault("ai_sentiment_confidence", 0.0)
+        updates.setdefault("ai_category_confidence", 0.0)
+        updates.setdefault("ai_urgency", 0.5)
+
+        # Remove None values to avoid database issues
+        updates = {k: v for k, v in updates.items() if v is not None}
+
         return updates
 
     def _apply_fallback_analysis(self, ticket_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -107,9 +116,15 @@ class AIIntegrationService:
         if not enhanced_data.get("severity"):
             enhanced_data["severity"] = 3
         
-        # Add fallback indicators
+        # Add fallback indicators with proper default values
         enhanced_data["ai_enabled"] = False
-        enhanced_data["fallback_reason"] = "AI service unavailable"
+        enhanced_data["ai_severity_confidence"] = 0.0
+        enhanced_data["ai_sentiment_confidence"] = 0.0
+        enhanced_data["ai_category_confidence"] = 0.0
+        enhanced_data["ai_urgency"] = 0.5  # Default neutral urgency
+        
+        # Remove None values to avoid database issues
+        enhanced_data = {k: v for k, v in enhanced_data.items() if v is not None}
         
         return enhanced_data
 

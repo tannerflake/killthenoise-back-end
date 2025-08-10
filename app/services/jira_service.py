@@ -8,6 +8,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant_integration import TenantIntegration
+from app.services.ai_clustering_service import AIIssueClusteringService
 
 
 class JiraService:
@@ -239,6 +240,29 @@ class JiraService:
                 }
                 issues.append(issue_data)
             
+            # Ingest raw reports for AI grouping (v1)
+            try:
+                clustering = AIIssueClusteringService(self.tenant_id, self.session)
+                for _it in data.get("issues", []):
+                    if not _it:
+                        continue
+                    _fields = _it.get("fields", {}) or {}
+                    _title = _fields.get("summary") or _it.get("key")
+                    _body = None
+                    _url = f"{self._base_url}/browse/{_it.get('key')}" if _it.get('key') else None
+                    await clustering.ingest_raw_report(
+                        source="jira",
+                        external_id=_it.get("key"),
+                        title=_title,
+                        body=_body,
+                        url=_url,
+                        commit=False,  # Bulk insert without individual commits
+                    )
+                await self.session.commit()  # Commit all at once
+                await clustering.recluster()
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "issues": issues,

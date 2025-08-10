@@ -8,6 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.issue import Issue
+from app.models.ai_issue_group import AIIssueGroup
+from app.models.ai_issue_group_report import AIIssueGroupReport
+from app.models.raw_report import RawReport
+from app.services.ai_clustering_service import AIIssueClusteringService
+from app.services.ai_clustering_service import _simple_signature
 
 router = APIRouter(prefix="/api/issues", tags=["Issues"])
 
@@ -93,3 +98,208 @@ async def list_issues(
         return {"success": True, "data": issues_data, "count": len(issues_data)}
     except Exception as e:
         return {"success": False, "error": str(e), "data": [], "count": 0}
+
+
+# --------------------------- AI Issue Groups ---------------------------
+
+@router.get("/ai")
+async def list_ai_issue_groups(
+    tenant_id: str | None = None,
+    limit: int = Query(10, ge=1, le=100),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    try:
+        stmt = select(AIIssueGroup)
+        if tenant_id:
+            from uuid import UUID
+
+            stmt = stmt.where(AIIssueGroup.tenant_id == UUID(tenant_id))
+        stmt = stmt.order_by(desc(AIIssueGroup.updated_at)).limit(limit)
+
+        result = await session.execute(stmt)
+        groups = result.scalars().all()
+
+        def clean_summary(summary: str | None) -> str | None:
+            """Remove signature prefix from summary for frontend display."""
+            if not summary:
+                return None
+            if summary.startswith("sig:") and "|" in summary:
+                return summary.split("|", 1)[1]
+            return summary
+
+        data = [
+            {
+                "id": str(g.id),
+                "tenant_id": str(g.tenant_id),
+                "title": g.title,
+                "summary": clean_summary(g.summary),
+                "severity": g.severity,
+                "tags": g.tags,
+                "status": g.status,
+                "frequency": g.frequency,
+                "sources": g.sources,
+                "updated_at": g.updated_at.isoformat() if g.updated_at else None,
+            }
+            for g in groups
+        ]
+
+        return {"success": True, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e), "data": [], "count": 0}
+
+
+@router.get("/ai/{group_id}/reports")
+async def list_ai_issue_group_reports(
+    group_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    try:
+        from uuid import UUID
+
+        gid = UUID(group_id)
+        # Join links -> reports
+        link_stmt = select(AIIssueGroupReport).where(AIIssueGroupReport.group_id == gid)
+        link_result = await session.execute(link_stmt)
+        links = link_result.scalars().all()
+        report_ids = [l.report_id for l in links]
+
+        if not report_ids:
+            return {"success": True, "data": [], "count": 0}
+
+        report_stmt = select(RawReport).where(RawReport.id.in_(report_ids))
+        report_result = await session.execute(report_stmt)
+        reports = report_result.scalars().all()
+
+        data = [
+            {
+                "id": str(r.id),
+                "source": r.source,
+                "external_id": r.external_id,
+                "title": r.title,
+                "url": r.url,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in reports
+        ]
+
+        return {"success": True, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e), "data": [], "count": 0}
+
+
+@router.post("/ai/recluster/{tenant_id}")
+async def recluster_ai_issues(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    from uuid import UUID
+
+    service = AIIssueClusteringService(UUID(tenant_id), session)
+    result = await service.recluster()
+    return result
+
+
+@router.post("/ai/cleanup-duplicates/{tenant_id}")
+async def cleanup_duplicate_raw_reports(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Remove duplicate raw reports, keeping only the most recent for each external_id."""
+    try:
+        from uuid import UUID
+        from sqlalchemy import delete, func, desc
+        from app.models.raw_report import RawReport
+        from app.models.ai_issue_group_report import AIIssueGroupReport
+
+        tenant_uuid = UUID(tenant_id)
+        
+        # Find duplicates (same tenant_id + source + external_id)
+        duplicates_query = (
+            select(
+                RawReport.tenant_id,
+                RawReport.source,
+                RawReport.external_id,
+                func.array_agg(RawReport.id.op('ORDER BY')(desc(RawReport.created_at))).label('ids'),
+                func.count(RawReport.id).label('count')
+            )
+            .where(RawReport.tenant_id == tenant_uuid)
+            .group_by(RawReport.tenant_id, RawReport.source, RawReport.external_id)
+            .having(func.count(RawReport.id) > 1)
+        )
+        
+        result = await session.execute(duplicates_query)
+        duplicate_groups = result.all()
+        
+        removed_count = 0
+        for group in duplicate_groups:
+            ids_to_remove = group.ids[1:]  # Keep first (most recent), remove rest
+            if ids_to_remove:
+                # Remove group-report links first
+                await session.execute(
+                    delete(AIIssueGroupReport).where(AIIssueGroupReport.report_id.in_(ids_to_remove))
+                )
+                # Remove the duplicate reports
+                await session.execute(
+                    delete(RawReport).where(RawReport.id.in_(ids_to_remove))
+                )
+                removed_count += len(ids_to_remove)
+        
+        await session.commit()
+        
+        # Recluster after cleanup
+        service = AIIssueClusteringService(tenant_uuid, session)
+        recluster_result = await service.recluster()
+        
+        return {
+            "success": True,
+            "removed_duplicates": removed_count,
+            "recluster_result": recluster_result
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/ai/backfill/{tenant_id}")
+async def backfill_raw_reports_from_issues(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Backfill raw_reports from existing normalized issues (v1 utility).
+
+    Creates one RawReport per Issue row for the tenant.
+    """
+    from uuid import UUID
+
+    tid = UUID(tenant_id)
+
+    try:
+        result = await session.execute(
+            select(Issue).where(Issue.tenant_id == tid)
+        )
+        issues = result.scalars().all()
+        created = 0
+
+        for it in issues:
+            title = it.title or ""
+            body = it.description or None
+            signature = _simple_signature(title, body)
+            external_id = it.jira_issue_key or it.hubspot_ticket_id
+            url = None
+
+            rr = RawReport(
+                tenant_id=tid,
+                source=it.source or "unknown",
+                external_id=external_id,
+                title=title,
+                body=body,
+                url=url,
+                signature=signature,
+            )
+            session.add(rr)
+            created += 1
+
+        await session.commit()
+        return {"success": True, "created": created}
+    except Exception as e:
+        await session.rollback()
+        return {"success": False, "error": str(e)}

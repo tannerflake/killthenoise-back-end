@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Query, Depends
-from sqlalchemy import select, desc
+from fastapi import APIRouter, Query, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select, desc, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -11,10 +12,22 @@ from app.models.issue import Issue
 from app.models.ai_issue_group import AIIssueGroup
 from app.models.ai_issue_group_report import AIIssueGroupReport
 from app.models.raw_report import RawReport
+from app.models.tenant_integration import TenantIntegration
 from app.services.ai_clustering_service import AIIssueClusteringService
 from app.services.ai_clustering_service import _simple_signature
 
 router = APIRouter(prefix="/api/issues", tags=["Issues"])
+
+
+# Pydantic models for Jira ticket creation
+class CreateJiraTicketRequest(BaseModel):
+    title: str
+    description: str
+
+
+class CreateJiraTicketResponse(BaseModel):
+    ticket_key: str
+    ticket_url: str
 
 
 @router.get("/top")
@@ -303,3 +316,235 @@ async def backfill_raw_reports_from_issues(
     except Exception as e:
         await session.rollback()
         return {"success": False, "error": str(e)}
+
+
+@router.post("/ai/{ai_issue_id}/create-jira-ticket")
+async def create_jira_ticket_from_ai_issue(
+    ai_issue_id: str,
+    request: CreateJiraTicketRequest,
+    tenant_id: str = Query(..., description="Tenant ID"),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Create a new Jira ticket from an AI issue group."""
+    try:
+        from uuid import UUID
+        import httpx
+        import base64
+        import json
+        from datetime import datetime
+
+        tenant_uuid = UUID(tenant_id)
+        ai_issue_uuid = UUID(ai_issue_id)
+
+        # 1. Validate AI issue group exists and belongs to tenant
+        ai_issue_query = select(AIIssueGroup).where(
+            and_(
+                AIIssueGroup.id == ai_issue_uuid,
+                AIIssueGroup.tenant_id == tenant_uuid
+            )
+        )
+        ai_issue_result = await session.execute(ai_issue_query)
+        ai_issue = ai_issue_result.scalars().first()
+
+        if not ai_issue:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "AI issue group not found",
+                    "message": "The specified AI issue group was not found or doesn't belong to your tenant"
+                }
+            )
+
+        # 2. Validate input
+        if not request.title.strip():
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Invalid title",
+                    "message": "Ticket title cannot be empty"
+                }
+            )
+
+        if not request.description.strip():
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Invalid description", 
+                    "message": "Ticket description cannot be empty"
+                }
+            )
+
+        # 3. Get active Jira integration for the tenant
+        jira_integration_query = select(TenantIntegration).where(
+            and_(
+                TenantIntegration.tenant_id == tenant_uuid,
+                TenantIntegration.integration_type == "jira",
+                TenantIntegration.is_active == True
+            )
+        )
+        jira_result = await session.execute(jira_integration_query)
+        jira_integration = jira_result.scalars().first()
+
+        if not jira_integration:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "No Jira integration",
+                    "message": "No active Jira integration found for your tenant. Please set up Jira integration first."
+                }
+            )
+
+        # 4. Get Jira configuration
+        config = jira_integration.config or {}
+        base_url = config.get("base_url")
+        access_token = config.get("access_token")
+        email = config.get("email")
+
+        if not base_url or not access_token:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Invalid Jira configuration",
+                    "message": "Jira integration is not properly configured"
+                }
+            )
+
+        # 5. Create Jira ticket via API
+        jira_url = f"{base_url}/rest/api/3/issue"
+        
+        # Prepare auth header
+        if access_token.startswith('ATATT') and email:
+            # API token - use Basic Auth
+            credentials = base64.b64encode(f"{email}:{access_token}".encode()).decode()
+            auth_header = f"Basic {credentials}"
+        else:
+            # OAuth token
+            auth_header = f"Bearer {access_token}"
+
+        # Prepare Jira ticket payload
+        jira_payload = {
+            "fields": {
+                "project": {
+                    "key": "SCRUM"  # Default project - could be configurable
+                },
+                "summary": request.title.strip(),
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": request.description.strip()
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "issuetype": {
+                    "name": "Task"  # Default issue type - could be configurable
+                }
+            }
+        }
+
+        # Make API call to Jira
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                jira_url,
+                headers={
+                    "Authorization": auth_header,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                json=jira_payload,
+                timeout=30.0
+            )
+
+            if response.status_code not in [200, 201]:
+                error_detail = "Unknown error"
+                try:
+                    error_response = response.json()
+                    error_detail = error_response.get("errors", {}) or error_response.get("errorMessages", ["Unknown error"])
+                except:
+                    error_detail = f"HTTP {response.status_code}: {response.text[:200]}"
+
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "Jira API error",
+                        "message": f"Failed to create Jira ticket: {error_detail}"
+                    }
+                )
+
+            jira_response = response.json()
+            ticket_key = jira_response.get("key")
+            
+            if not ticket_key:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "Invalid Jira response",
+                        "message": "Jira API didn't return a ticket key"
+                    }
+                )
+
+        # 6. Create raw report linking AI issue to Jira ticket
+        ticket_url = f"{base_url}/browse/{ticket_key}"
+        
+        # Use the AI clustering service to create the link
+        clustering_service = AIIssueClusteringService(tenant_uuid, session)
+        new_report = await clustering_service.ingest_raw_report(
+            source="jira",
+            external_id=ticket_key,
+            title=request.title.strip(),
+            body=request.description.strip(),
+            url=ticket_url,
+            commit=False
+        )
+
+        # Link the new report to the AI issue group
+        link = AIIssueGroupReport(group_id=ai_issue.id, report_id=new_report.id)
+        session.add(link)
+
+        # Update AI issue group frequency and sources
+        ai_issue.frequency += 1
+        sources = list(ai_issue.sources) if ai_issue.sources else []
+        
+        # Update Jira count in sources
+        jira_source_found = False
+        for source in sources:
+            if source.get("source") == "jira":
+                source["count"] = source.get("count", 0) + 1
+                jira_source_found = True
+                break
+        
+        if not jira_source_found:
+            sources.append({"source": "jira", "count": 1})
+        
+        ai_issue.sources = sources
+
+        await session.commit()
+
+        return {
+            "success": True,
+            "data": {
+                "ticket_key": ticket_key,
+                "ticket_url": ticket_url
+            },
+            "message": "Jira ticket created successfully"
+        }
+
+    except HTTPException:
+        await session.rollback()
+        raise
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Internal server error",
+                "message": f"An unexpected error occurred: {str(e)}"
+            }
+        )

@@ -251,35 +251,49 @@ class HubSpotService:
         start_time = time.time()
 
         try:
+            logger.info(f"Starting HubSpot sync for tenant {self.tenant_id}, integration {self.integration_id}")
+            
             # Get last sync time if not specified
             if since is None and sync_type == "incremental":
                 integration = await session.get(TenantIntegration, self.integration_id)
                 since = integration.last_synced_at
 
             # Fetch tickets using our reliable method
+            logger.info("Fetching HubSpot tickets...")
             tickets_result = await self.list_tickets(session)
+            logger.info(f"Tickets result: {tickets_result}")
             
             if not tickets_result.get("success"):
                 raise ValueError(f"Failed to fetch tickets: {tickets_result.get('error')}")
             
             tickets = tickets_result.get("tickets", [])
+            logger.info(f"Fetched {len(tickets)} tickets from HubSpot")
 
             # Transform and upsert
+            logger.info("Transforming tickets to issues...")
             issue_dicts = []
             for ticket in tickets:
                 issue_dict = await self._transform_ticket_to_issue(ticket)
                 issue_dicts.append(issue_dict)
 
             if issue_dicts:
+                logger.info(f"Upserting {len(issue_dicts)} issues...")
                 await upsert_many(session, issue_dicts)
 
             # Ingest raw reports for AI grouping (v1)
             try:
+                logger.info(f"Starting raw report ingestion for {len(tickets)} HubSpot tickets")
+                
+                # Use the same session for AI clustering to maintain transaction consistency
                 clustering = AIIssueClusteringService(self.tenant_id, session)
+                
                 for ticket in tickets:
                     props = ticket.get("properties", {})
                     title = props.get("subject") or f"Ticket {ticket['id']}"
                     body = props.get("content")
+                    
+                    logger.debug(f"Processing ticket {ticket['id']}: {title}")
+                    
                     await clustering.ingest_raw_report(
                         source="hubspot",
                         external_id=str(ticket["id"]),
@@ -288,12 +302,19 @@ class HubSpotService:
                         url=None,
                         commit=False,  # Bulk insert without individual commits
                     )
-                await session.commit()  # Commit all at once
+                
+                logger.info(f"Successfully ingested {len(tickets)} raw reports from HubSpot")
+                
                 # Rebuild groups incrementally
-                await clustering.recluster()
-            except Exception:
-                # Non-fatal for sync if AI grouping fails
-                pass
+                logger.info("Starting reclustering...")
+                recluster_result = await clustering.recluster()
+                logger.info(f"Reclustering completed: {recluster_result}")
+                
+            except Exception as e:
+                # Log the error but don't fail the sync
+                logger.error(f"Error during AI clustering for HubSpot sync: {str(e)}")
+                logger.exception("Full traceback:")
+                # Continue with sync even if AI clustering fails
 
             # Update sync event
             duration = int(time.time() - start_time)

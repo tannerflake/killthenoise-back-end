@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import os
 from typing import Dict, List, Any, Optional
 from uuid import UUID
@@ -171,16 +172,99 @@ async def jira_sync(
 
 async def _run_full_sync(tenant_id: UUID, integration_id: UUID):
     """Background task for full sync."""
-    # This would implement the full sync logic
-    # For now, just a placeholder
-    pass
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"Starting background full sync for tenant {tenant_id}, integration {integration_id}")
+    
+    try:
+        async for session in get_db():
+            service = create_jira_service(tenant_id, integration_id, session)
+            
+            # Fetch Jira issues
+            logger.info("Fetching Jira issues...")
+            issues_result = await service.list_issues()
+            logger.info(f"Issues result: {issues_result}")
+            
+            if issues_result.get("success"):
+                issues = issues_result.get("issues", [])
+                logger.info(f"Fetched {len(issues)} Jira issues")
+                
+                # The AI clustering is already handled in the list_issues method
+                # Just need to update the integration status
+                
+                # Update integration last_synced_at
+                integration = await session.get(TenantIntegration, integration_id)
+                if integration:
+                    integration.last_synced_at = dt.datetime.utcnow()
+                    integration.last_sync_status = "success"
+                    integration.sync_error_message = None
+                    await session.commit()
+                
+                result = {
+                    "success": True,
+                    "processed": len(issues),
+                    "updated": len(issues),
+                    "tenant_id": str(tenant_id)
+                }
+                logger.info(f"Background full sync completed: {result}")
+                return result
+            else:
+                error_msg = f"Failed to fetch Jira issues: {issues_result.get('error')}"
+                logger.error(error_msg)
+                return {"success": False, "error": error_msg}
+            
+    except Exception as e:
+        logger.error(f"Background full sync failed: {str(e)}")
+        logger.exception("Full traceback:")
+        return {"success": False, "error": str(e)}
 
 
 async def _run_incremental_sync(tenant_id: UUID, integration_id: UUID):
     """Background task for incremental sync."""
-    # This would implement the incremental sync logic
-    # For now, just a placeholder
-    pass
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"Starting background incremental sync for tenant {tenant_id}, integration {integration_id}")
+    
+    try:
+        async for session in get_db():
+            service = create_jira_service(tenant_id, integration_id, session)
+            
+            # For incremental sync, we could filter by updated date
+            # For now, just do a full sync
+            logger.info("Performing incremental sync (using full sync for now)...")
+            issues_result = await service.list_issues()
+            
+            if issues_result.get("success"):
+                issues = issues_result.get("issues", [])
+                logger.info(f"Fetched {len(issues)} Jira issues")
+                
+                # Update integration last_synced_at
+                integration = await session.get(TenantIntegration, integration_id)
+                if integration:
+                    integration.last_synced_at = dt.datetime.utcnow()
+                    integration.last_sync_status = "success"
+                    integration.sync_error_message = None
+                    await session.commit()
+                
+                result = {
+                    "success": True,
+                    "processed": len(issues),
+                    "updated": len(issues),
+                    "tenant_id": str(tenant_id)
+                }
+                logger.info(f"Background incremental sync completed: {result}")
+                return result
+            else:
+                error_msg = f"Failed to fetch Jira issues: {issues_result.get('error')}"
+                logger.error(error_msg)
+                return {"success": False, "error": error_msg}
+            
+    except Exception as e:
+        logger.error(f"Background incremental sync failed: {str(e)}")
+        logger.exception("Full traceback:")
+        return {"success": False, "error": str(e)}
 
 
 # -------------------------------------------------------------------------

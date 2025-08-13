@@ -272,6 +272,100 @@ async def cleanup_duplicate_raw_reports(
         return {"success": False, "error": str(e)}
 
 
+@router.post("/ai/test-raw-report/{tenant_id}")
+async def test_create_raw_report(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Test endpoint to manually create a raw report."""
+    from uuid import UUID
+    from app.services.ai_clustering_service import AIIssueClusteringService
+
+    try:
+        tid = UUID(tenant_id)
+        clustering = AIIssueClusteringService(tid, session)
+        
+        # Create a test raw report
+        report = await clustering.ingest_raw_report(
+            source="test",
+            external_id="test-123",
+            title="Test HubSpot Ticket",
+            body="This is a test ticket from HubSpot",
+            url=None,
+            commit=True
+        )
+        
+        # Recluster to create AI issue group
+        await clustering.recluster()
+        
+        return {
+            "success": True,
+            "report_id": str(report.id),
+            "message": "Test raw report created successfully"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/ai/force-hubspot-sync/{tenant_id}")
+async def force_hubspot_raw_reports(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Force creation of raw reports from HubSpot tickets."""
+    from uuid import UUID
+    from app.services.ai_clustering_service import AIIssueClusteringService
+    import httpx
+
+    try:
+        tid = UUID(tenant_id)
+        
+        # Get HubSpot tickets
+        tickets_response = await httpx.AsyncClient().get(
+            f"http://localhost:8000/api/hubspot/tickets/{tenant_id}/67aa21ad-b348-4b50-9333-b7b03c726d39"
+        )
+        tickets_data = tickets_response.json()
+        
+        if not tickets_data.get("success"):
+            return {"success": False, "error": "Failed to fetch HubSpot tickets"}
+        
+        tickets = tickets_data.get("tickets", [])
+        if not tickets:
+            return {"success": False, "error": "No HubSpot tickets found"}
+        
+        # Create raw reports
+        clustering = AIIssueClusteringService(tid, session)
+        created_count = 0
+        
+        for ticket in tickets:
+            props = ticket.get("properties", {})
+            title = props.get("subject") or f"Ticket {ticket['id']}"
+            body = props.get("content")
+            
+            await clustering.ingest_raw_report(
+                source="hubspot",
+                external_id=str(ticket["id"]),
+                title=title,
+                body=body,
+                url=None,
+                commit=False
+            )
+            created_count += 1
+        
+        await session.commit()
+        
+        # Recluster to create AI issue groups
+        await clustering.recluster()
+        
+        return {
+            "success": True,
+            "created_raw_reports": created_count,
+            "message": f"Created {created_count} raw reports from HubSpot tickets"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @router.post("/ai/backfill/{tenant_id}")
 async def backfill_raw_reports_from_issues(
     tenant_id: str,

@@ -242,7 +242,11 @@ class JiraService:
             
             # Ingest raw reports for AI grouping (v1)
             try:
+                logger.info(f"Starting raw report ingestion for {len(data.get('issues', []))} Jira issues")
+                
+                # Use the same session for AI clustering to maintain transaction consistency
                 clustering = AIIssueClusteringService(self.tenant_id, self.session)
+                
                 for _it in data.get("issues", []):
                     if not _it:
                         continue
@@ -250,6 +254,9 @@ class JiraService:
                     _title = _fields.get("summary") or _it.get("key")
                     _body = None
                     _url = f"{self._base_url}/browse/{_it.get('key')}" if _it.get('key') else None
+                    
+                    logger.debug(f"Processing Jira issue {_it.get('key')}: {_title}")
+                    
                     await clustering.ingest_raw_report(
                         source="jira",
                         external_id=_it.get("key"),
@@ -258,10 +265,19 @@ class JiraService:
                         url=_url,
                         commit=False,  # Bulk insert without individual commits
                     )
-                await self.session.commit()  # Commit all at once
-                await clustering.recluster()
-            except Exception:
-                pass
+                
+                logger.info(f"Successfully ingested {len(data.get('issues', []))} raw reports from Jira")
+                
+                # Rebuild groups incrementally
+                logger.info("Starting reclustering...")
+                recluster_result = await clustering.recluster()
+                logger.info(f"Reclustering completed: {recluster_result}")
+                
+            except Exception as e:
+                # Log the error but don't fail the sync
+                logger.error(f"Error during AI clustering for Jira sync: {str(e)}")
+                logger.exception("Full traceback:")
+                # Continue with sync even if AI clustering fails
 
             return {
                 "success": True,

@@ -76,7 +76,7 @@ async def hubspot_sync(
                 "details": connection_test
             }
         
-        # Run sync in background
+        # Run sync in background with proper result handling
         if sync_type == "full":
             background_tasks.add_task(_run_full_sync, tenant_id, integration_id)
         else:
@@ -97,18 +97,38 @@ async def hubspot_sync(
 
 async def _run_full_sync(tenant_id: UUID, integration_id: UUID):
     """Background task for full sync."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"Starting background full sync for tenant {tenant_id}, integration {integration_id}")
     service = create_hubspot_service(tenant_id, integration_id)
     try:
-        await service.sync_full()
+        result = await service.sync_full()
+        logger.info(f"Background full sync completed: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Background full sync failed: {str(e)}")
+        logger.exception("Full traceback:")
+        return {"success": False, "error": str(e)}
     finally:
         await service.close()
 
 
 async def _run_incremental_sync(tenant_id: UUID, integration_id: UUID):
     """Background task for incremental sync."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"Starting background incremental sync for tenant {tenant_id}, integration {integration_id}")
     service = create_hubspot_service(tenant_id, integration_id)
     try:
-        await service.sync_incremental()
+        result = await service.sync_incremental()
+        logger.info(f"Background incremental sync completed: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Background incremental sync failed: {str(e)}")
+        logger.exception("Full traceback:")
+        return {"success": False, "error": str(e)}
     finally:
         await service.close()
 

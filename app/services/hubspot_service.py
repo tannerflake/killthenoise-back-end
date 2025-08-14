@@ -79,16 +79,49 @@ class HubSpotService:
             return False
 
     async def _get_valid_token(self, session: AsyncSession) -> str:
-        """Get a valid access token for this tenant, validating it first."""
+        """Get a valid access token for this tenant, refreshing if needed."""
         integration = await self._get_active_integration(session)
         
-        # Get token from integration config
+        # Get tokens from integration config
         access_token = integration.config.get("access_token")
+        refresh_token = integration.config.get("refresh_token")
+        
         if not access_token:
             raise ValueError(f"No HubSpot access token configured for tenant {self.tenant_id}")
 
-        # Validate the token
+        # Check if token is expired or about to expire (within 5 minutes)
+        token_created_at = integration.config.get("token_created_at")
+        expires_in = integration.config.get("expires_in", 3600)
+        
+        if token_created_at and expires_in:
+            try:
+                created_at = dt.datetime.fromisoformat(token_created_at.replace('Z', '+00:00'))
+                expires_at = created_at + dt.timedelta(seconds=expires_in)
+                buffer_time = dt.timedelta(minutes=5)
+                
+                # If token is expired or will expire soon, try to refresh it
+                if dt.datetime.utcnow() + buffer_time >= expires_at:
+                    if refresh_token:
+                        logger.info(f"Token expired for tenant {self.tenant_id}, attempting refresh")
+                        new_token = await self._refresh_access_token(session, integration, refresh_token)
+                        if new_token:
+                            self._access_token = new_token
+                            return new_token
+                    else:
+                        logger.warning(f"No refresh token available for tenant {self.tenant_id}")
+            except Exception as e:
+                logger.error(f"Error checking token expiration for tenant {self.tenant_id}: {e}")
+
+        # Validate the current token
         if not await self._validate_token(access_token):
+            # Try to refresh if we have a refresh token
+            if refresh_token:
+                logger.info(f"Token validation failed for tenant {self.tenant_id}, attempting refresh")
+                new_token = await self._refresh_access_token(session, integration, refresh_token)
+                if new_token:
+                    self._access_token = new_token
+                    return new_token
+            
             # Mark integration as having sync issues
             integration.last_sync_status = "failed"
             integration.sync_error_message = "Invalid or expired access token"
@@ -97,6 +130,56 @@ class HubSpotService:
 
         self._access_token = access_token
         return access_token
+
+    async def _refresh_access_token(self, session: AsyncSession, integration: TenantIntegration, refresh_token: str) -> Optional[str]:
+        """Refresh the access token using the refresh token."""
+        try:
+            client_id = os.getenv("HUBSPOT_CLIENT_ID")
+            client_secret = os.getenv("HUBSPOT_CLIENT_SECRET")
+            
+            if not client_id or not client_secret:
+                logger.error("HubSpot OAuth credentials not configured for token refresh")
+                return None
+            
+            token_data = {
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.hubapi.com/oauth/v1/token",
+                    data=token_data,
+                    timeout=15
+                )
+                response.raise_for_status()
+                token_response = response.json()
+            
+            new_access_token = token_response.get("access_token")
+            new_refresh_token = token_response.get("refresh_token", refresh_token)  # Use new refresh token if provided
+            new_expires_in = token_response.get("expires_in", 3600)
+            
+            if not new_access_token:
+                logger.error(f"Failed to obtain new access token for tenant {self.tenant_id}")
+                return None
+            
+            # Update the integration with new tokens
+            integration.config.update({
+                "access_token": new_access_token,
+                "refresh_token": new_refresh_token,
+                "expires_in": new_expires_in,
+                "token_created_at": dt.datetime.utcnow().isoformat()
+            })
+            
+            await session.commit()
+            logger.info(f"Successfully refreshed access token for tenant {self.tenant_id}")
+            return new_access_token
+            
+        except Exception as e:
+            logger.error(f"Failed to refresh access token for tenant {self.tenant_id}: {e}")
+            return None
 
     async def _get_client(self, session: AsyncSession) -> httpx.AsyncClient:
         """Get configured HTTP client with validated token."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import os
 from typing import Dict, List, Any, Optional
 from uuid import UUID
@@ -76,7 +77,7 @@ async def hubspot_sync(
                 "details": connection_test
             }
         
-        # Run sync in background with proper result handling
+        # Run sync in background
         if sync_type == "full":
             background_tasks.add_task(_run_full_sync, tenant_id, integration_id)
         else:
@@ -97,38 +98,18 @@ async def hubspot_sync(
 
 async def _run_full_sync(tenant_id: UUID, integration_id: UUID):
     """Background task for full sync."""
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    logger.info(f"Starting background full sync for tenant {tenant_id}, integration {integration_id}")
     service = create_hubspot_service(tenant_id, integration_id)
     try:
-        result = await service.sync_full()
-        logger.info(f"Background full sync completed: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Background full sync failed: {str(e)}")
-        logger.exception("Full traceback:")
-        return {"success": False, "error": str(e)}
+        await service.sync_full()
     finally:
         await service.close()
 
 
 async def _run_incremental_sync(tenant_id: UUID, integration_id: UUID):
     """Background task for incremental sync."""
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    logger.info(f"Starting background incremental sync for tenant {tenant_id}, integration {integration_id}")
     service = create_hubspot_service(tenant_id, integration_id)
     try:
-        result = await service.sync_incremental()
-        logger.info(f"Background incremental sync completed: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Background incremental sync failed: {str(e)}")
-        logger.exception("Full traceback:")
-        return {"success": False, "error": str(e)}
+        await service.sync_incremental()
     finally:
         await service.close()
 
@@ -240,6 +221,92 @@ async def create_hubspot_integration(
 # OAuth 2.0 authorization flow
 # -------------------------------------------------------------------------
 
+@router.get("/auth-status/{tenant_id}")
+async def hubspot_auth_status(
+    tenant_id: UUID,
+    session: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Check if a tenant has an active HubSpot integration that can be used."""
+    try:
+        from sqlalchemy import select
+        
+        # Find the most recent active HubSpot integration for this tenant
+        stmt = select(TenantIntegration).where(
+            TenantIntegration.tenant_id == tenant_id,
+            TenantIntegration.integration_type == "hubspot",
+            TenantIntegration.is_active == True
+        ).order_by(TenantIntegration.created_at.desc())
+        
+        result = await session.execute(stmt)
+        integrations = result.scalars().all()
+        
+        # Use the most recent integration
+        integration = integrations[0] if integrations else None
+        
+        if not integration:
+            return {
+                "authenticated": False,
+                "message": "No active HubSpot integration found",
+                "needs_auth": True
+            }
+        
+        # Check if we have a valid token
+        has_token = bool(integration.config.get("access_token"))
+        has_refresh_token = bool(integration.config.get("refresh_token"))
+        
+        if not has_token:
+            return {
+                "authenticated": False,
+                "message": "Integration exists but no access token configured",
+                "needs_auth": True,
+                "integration_id": str(integration.id)
+            }
+        
+        # Test the connection
+        try:
+            service = create_hubspot_service(tenant_id, integration.id)
+            status = await service.test_connection(session)
+            await service.close()
+            
+            if status.get("connected"):
+                return {
+                    "authenticated": True,
+                    "message": "HubSpot integration is active and working",
+                    "needs_auth": False,
+                    "integration_id": str(integration.id),
+                    "hub_domain": status.get("hub_domain"),
+                    "scopes": status.get("scopes", [])
+                }
+            else:
+                # If we have a refresh token, we can try to refresh
+                if has_refresh_token:
+                    return {
+                        "authenticated": False,
+                        "message": "Token expired but refresh token available",
+                        "needs_auth": False,
+                        "can_refresh": True,
+                        "integration_id": str(integration.id)
+                    }
+                else:
+                    return {
+                        "authenticated": False,
+                        "message": "Token expired and no refresh token available",
+                        "needs_auth": True,
+                        "integration_id": str(integration.id)
+                    }
+                    
+        except Exception as e:
+            return {
+                "authenticated": False,
+                "message": f"Error testing connection: {str(e)}",
+                "needs_auth": True,
+                "integration_id": str(integration.id)
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/authorize/{tenant_id}")
 async def hubspot_authorize_url(
     tenant_id: UUID,
@@ -337,6 +404,9 @@ async def hubspot_oauth_callback(
             token_response = response.json()
         
         access_token = token_response.get("access_token")
+        refresh_token = token_response.get("refresh_token")
+        expires_in = token_response.get("expires_in", 3600)  # Default to 1 hour
+        
         if not access_token:
             raise HTTPException(status_code=400, detail="Failed to obtain access token")
         
@@ -348,8 +418,13 @@ async def hubspot_oauth_callback(
             await service.close()
             raise HTTPException(status_code=400, detail="Received invalid access token from HubSpot")
         
-        # Update integration with token and activate it
-        integration.config = {"access_token": access_token}
+        # Update integration with tokens and activate it
+        integration.config = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_in": expires_in,
+            "token_created_at": dt.datetime.utcnow().isoformat()
+        }
         integration.is_active = True
         await session.commit()
         
@@ -408,6 +483,47 @@ async def hubspot_oauth_callback(
         """
         
         return Response(content=html_content, media_type="text/html")
+
+
+@router.post("/refresh-token/{tenant_id}/{integration_id}")
+async def hubspot_refresh_token(
+    tenant_id: UUID,
+    integration_id: UUID,
+    session: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Manually refresh the access token for a HubSpot integration."""
+    try:
+        # Get the integration
+        integration = await session.get(TenantIntegration, integration_id)
+        if not integration or integration.tenant_id != tenant_id:
+            raise HTTPException(status_code=400, detail="Integration not found")
+        
+        if not integration.is_active:
+            raise HTTPException(status_code=400, detail="Integration is not active")
+        
+        refresh_token = integration.config.get("refresh_token")
+        if not refresh_token:
+            raise HTTPException(status_code=400, detail="No refresh token available")
+        
+        # Use the service to refresh the token
+        service = create_hubspot_service(tenant_id, integration_id)
+        new_token = await service._refresh_access_token(session, integration, refresh_token)
+        await service.close()
+        
+        if new_token:
+            return {
+                "success": True,
+                "message": "Token refreshed successfully",
+                "integration_id": str(integration_id),
+                "tenant_id": str(tenant_id)
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to refresh token")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # -------------------------------------------------------------------------

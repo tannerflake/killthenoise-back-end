@@ -1,0 +1,158 @@
+{
+  "metadata": {
+    "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
+    "generated_at": "2025-08-13T02:40:22.362330+00:00",
+    "total_issues": 10,
+    "ai_model": "claude-3-haiku-20240307"
+  },
+  "issues": [
+    {
+      "id": 1,
+      "type": "performance",
+      "source": "jira",
+      "title": "Slow Response Times During Peak Usage Hours for Customer Dashboard",
+      "description": "The customer dashboard of our SaaS application is experiencing significant performance issues during our busiest hours, between 9 AM and 5 PM. Users report that the dashboard takes 10-15 seconds to load, making it difficult to quickly access and analyze critical business data. This is impacting our customers' productivity and decision-making abilities.",
+      "severity": 4,
+      "status": "open",
+      "tags": "performance,customer-dashboard,peak-usage,response-time",
+      "created_at": "2025-08-11T02:40:23.810299+00:00",
+      "ai_generated": true,
+      "jira_issue_key": "TEST-359"
+    },
+    {
+      "id": 2,
+      "type": "bug",
+      "source": "hubspot",
+      "title": "Leads not syncing from HubSpot to Salesforce after latest update",
+      "description": "After the recent HubSpot platform update, we are experiencing an issue where new leads created in HubSpot are not syncing over to our Salesforce instance. This is causing delays in our sales team's ability to follow up with these leads in a timely manner. We need this issue resolved as soon as possible.",
+      "severity": 4,
+      "status": "open",
+      "tags": "sync, integration, salesforce, leads",
+      "created_at": "2025-08-11T11:40:26.065239+00:00",
+      "ai_generated": true,
+      "hubspot_ticket_id": "HS-2186"
+    },
+    {
+      "id": 3,
+      "type": "bug",
+      "source": "jira",
+      "title": "Unable to add new products to inventory due to database connection error",
+      "description": "When trying to add a new product to the inventory, I'm getting an error message that says 'Unable to connect to database server'. This is preventing me from updating the product catalog and fulfilling customer orders. The issue seems to be intermittent, occurring about 20% of the time when I try to add a new product.",
+      "severity": 4,
+      "status": "open",
+      "tags": "inventory,database,connectivity,product-management",
+      "created_at": "2025-08-11T11:40:28.416567+00:00",
+      "ai_generated": true,
+      "jira_issue_key": "TEST-321"
+    },
+    {
+      "id": 4,
+      "type": "support",
+      "source": "hubspot",
+      "title": "Unable to upload large files in the SaaS application",
+      "description": "I'm trying to upload a 50MB file to the SaaS application, but the upload keeps failing with an error message saying 'File too large to upload'. I've checked the file size and it is well within the stated limits, but I'm still unable to get the file uploaded successfully.",
+      "severity": 3,
+      "status": "open",
+      "tags": "file upload,large files,error,technical support",
+      "created_at": "2025-08-13T00:40:30.770858+00:00",
+      "ai_generated": true,
+      "hubspot_ticket_id": "HS-3523"
+    },
+    {
+      "id": 5,
+      "type": "feature_request",
+      "source": "hubspot",
+      "title": "Integrate with Salesforce to streamline lead management and reporting",
+      "description": "As a growing sales team, we would greatly benefit from the ability to seamlessly sync our leads and customer data between our SaaS platform and Salesforce. This would help us optimize our lead management workflows and generate more robust sales reports across the two systems.",
+      "severity": 4,
+      "status": "open",
+      "tags": "integration,crm,lead-management,reporting",
+      "created_at": "2025-08-11T11:40:33.024350+00:00",
+      "ai_generated": true,
+      "hubspot_ticket_id": "HS-5012"
+    },
+    {
+      "id": 6,
+      "type": "feature_request",
+      "source": "hubspot",
+      "title": "Integrate our CRM with HubSpot to automate data synchronization",
+      "description": "We currently have a custom CRM system that houses all our customer and sales data. We would love to be able to integrate this CRM with HubSpot to automatically sync contact information, lead status, and other key data points. This would help our sales team access the most up-to-date information and avoid manual data entry.",
+      "severity": 4,
+      "status": "open",
+      "tags": "integration,crm,data-sync,automation",
+      "created_at": "2025-08-11T19:40:35.344258+00:00",
+      "ai_generated": true,
+      "hubspot_ticket_id": "HS-8621"
+    },
+    {
+      "id": 7,
+      "type": "feature_request",
+      "source": "hubspot",
+      "title": "Ability to Customize Email Templates for Outreach Campaigns",
+      "description": "As a sales team, we would like the ability to customize the email templates used in our outreach campaigns. The current templates are too generic and don't allow us to personalize the messaging for our prospects. We need more flexibility to create and edit templates that align with our brand and sales strategy.",
+      "severity": 4,
+      "status": "open",
+      "tags": "email, templates, marketing, sales, customization",
+      "created_at": "2025-08-12T23:40:37.463846+00:00",
+      "ai_generated": true,
+      "hubspot_ticket_id": "HS-3081"
+    },
+    {
+      "id": 8,
+      "type": "support",
+      "source": "jira",
+      "title": "Unable to access dashboard due to 404 error on login page",
+      "description": "I'm unable to access the dashboard for my company's account on your SaaS application. When I try to log in, I'm getting a 404 error on the login page. I've tried clearing my browser cache and cookies, but the issue persists. Can you please investigate and help me resolve this problem as soon as possible?",
+      "severity": 4,
+      "status": "open",
+      "tags": "login,dashboard,404,error",
+      "created_at": "2025-08-10T04:40:39.786493+00:00",
+      "ai_generated": true,
+      "jira_issue_key": "TEST-775"
+    },
+    {
+      "id": 9,
+      "type": "support",
+      "source": "hubspot",
+      "title": "Unable to login to my account, getting 'invalid credentials' error",
+      "description": "I'm trying to log in to my account on your SaaS application but keep getting an 'invalid credentials' error message. I'm sure I'm entering the correct email and password, and I haven't changed them recently. Can you please help me troubleshoot this issue?",
+      "severity": 3,
+      "status": "open",
+      "tags": "login,credentials,account,error",
+      "created_at": "2025-08-10T07:40:42.036234+00:00",
+      "ai_generated": true,
+      "hubspot_ticket_id": "HS-5745"
+    },
+    {
+      "id": 10,
+      "type": "integration",
+      "source": "hubspot",
+      "title": "Salesforce Integration with HubSpot CRM not syncing lead data correctly",
+      "description": "We've set up the Salesforce integration with HubSpot CRM, but we're experiencing issues with the sync. Certain lead data is not being transferred from Salesforce to HubSpot, and we're seeing discrepancies between the two systems. This is causing problems for our sales team, as they're unable to access complete lead information in HubSpot.",
+      "severity": 4,
+      "status": "open",
+      "tags": "salesforce,crm,integration,lead-sync,data-sync",
+      "created_at": "2025-08-10T17:40:44.492322+00:00",
+      "ai_generated": true,
+      "hubspot_ticket_id": "HS-8297"
+    }
+  ],
+  "statistics": {
+    "hubspot_issues": 7,
+    "jira_issues": 3,
+    "by_type": {
+      "performance": 1,
+      "bug": 2,
+      "support": 3,
+      "feature_request": 3,
+      "integration": 1
+    },
+    "by_severity": {
+      "4": 8,
+      "3": 2
+    },
+    "by_status": {
+      "open": 10
+    }
+  }
+}

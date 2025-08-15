@@ -70,3 +70,9 @@ app.include_router(sync.router)
 app.include_router(analytics.router)
 app.include_router(webhooks.router)
 app.include_router(slack.router)
+
+
+@app.get("/health")
+async def health_check():
+    """Basic health check endpoint for Railway."""
+    return {"status": "healthy", "message": "Service is running"}

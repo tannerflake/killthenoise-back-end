@@ -9,13 +9,12 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 # Load env before anything else
 load_dotenv()
 
-# Environment variables
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+# Environment variables  
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 # SQLAlchemy engine & session
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+engine = create_async_engine(os.getenv("DATABASE_URL"), echo=False, future=True)
 AsyncSessionLocal = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 # Declarative base for models

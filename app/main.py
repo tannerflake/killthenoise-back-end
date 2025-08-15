@@ -12,7 +12,7 @@ from app.db import Base, engine
 load_dotenv()
 
 from app.api import (analytics, hubspot, health, integrations, issues,  # noqa: E402
-                     jira, sync, webhooks)
+                     jira, sync, webhooks, slack)
 from app.services.scheduler_service import scheduler_service  # noqa: E402
 
 app = FastAPI(title="KillTheNoise API")
@@ -34,18 +34,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Create database tables if they don't exist and start scheduler."""
-
-    async def _create() -> None:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    try:
-        await _create()
-        print("[Startup] Database tables created successfully")
-    except Exception as exc:  # pragma: no cover
-        # Log but don't crash the app; handle outside if needed
-        print(f"[Startup] Failed to create tables: {exc!r}")
+    """Start scheduler and verify database connection."""
+    
+    # NOTE: Database tables are now managed by Alembic migrations
+    # Run 'alembic upgrade head' to create/update tables
+    print("[Startup] Using Alembic for database migrations")
 
     # Start the scheduler service
     try:
@@ -76,3 +69,4 @@ app.include_router(jira.router)
 app.include_router(sync.router)
 app.include_router(analytics.router)
 app.include_router(webhooks.router)
+app.include_router(slack.router)

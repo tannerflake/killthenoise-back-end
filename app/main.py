@@ -12,7 +12,7 @@ from app.db import Base, engine
 load_dotenv()
 
 from app.api import (analytics, hubspot, health, integrations, issues,  # noqa: E402
-                     jira, sync, webhooks)
+                     jira, sync, webhooks, slack)
 from app.services.scheduler_service import scheduler_service  # noqa: E402
 
 app = FastAPI(title="KillTheNoise API")
@@ -69,3 +69,4 @@ app.include_router(jira.router)
 app.include_router(sync.router)
 app.include_router(analytics.router)
 app.include_router(webhooks.router)
+app.include_router(slack.router)

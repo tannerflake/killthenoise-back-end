@@ -3,7 +3,7 @@ name = "killthenoise-backend"
 version = "0.1.0"
 description = "Backend API for KillTheNoise, built with FastAPI"
 authors = ["Your Name <your.email@example.com>"]
-packages = [{include = "app"}]
+packages = [{include = "app", from = "."}]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"

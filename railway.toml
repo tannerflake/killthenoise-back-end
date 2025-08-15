@@ -6,3 +6,6 @@ startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
+
+[variables]
+PYTHON_VERSION = "3.11"

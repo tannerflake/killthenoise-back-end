@@ -31,17 +31,20 @@ class AIAnalysisService:
                 self.analyze_severity(title, description, context),
                 self.analyze_sentiment(title, description),
                 self.analyze_categorization(title, description),
+                self.analyze_type(title, description),
                 return_exceptions=True
             )
 
             severity_result = analyses[0] if not isinstance(analyses[0], Exception) else {}
             sentiment_result = analyses[1] if not isinstance(analyses[1], Exception) else {}
             category_result = analyses[2] if not isinstance(analyses[2], Exception) else {}
+            type_result = analyses[3] if not isinstance(analyses[3], Exception) else {}
 
             return {
                 "severity": severity_result,
                 "sentiment": sentiment_result,
                 "categorization": category_result,
+                "type": type_result,
                 "tenant_id": str(self.tenant_id)
             }
 
@@ -104,6 +107,23 @@ class AIAnalysisService:
             logger.error(f"Categorization failed for tenant {self.tenant_id}: {e}")
             return {"category": "general", "tags": [], "confidence": 0.0}
 
+    async def analyze_type(self, title: str, description: str) -> Dict[str, Any]:
+        """Analyze whether the issue is a feature request or bug."""
+        try:
+            prompt = self._build_type_prompt(title, description)
+            
+            response = self.client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=100,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            return self._parse_type_response(response.content[0].text)
+
+        except Exception as e:
+            logger.error(f"Type analysis failed for tenant {self.tenant_id}: {e}")
+            return {"type": "bug", "confidence": 0.0, "reasoning": "Fallback"}
+
     def _build_severity_prompt(
         self, title: str, description: str, context: Dict[str, Any]
     ) -> str:
@@ -150,6 +170,24 @@ Categories: technical, billing, account, feature_request, bug_report, integratio
 
 Respond with JSON format:
 {{"category": "<category>", "tags": ["<tag1>", "<tag2>"], "confidence": <0.0-1.0>}}"""
+
+    def _build_type_prompt(self, title: str, description: str) -> str:
+        """Build prompt for type analysis."""
+        return f"""Analyze this support ticket and determine if it's a feature request or a bug.
+
+Title: {title}
+Description: {description or 'No description provided'}
+
+Classify as:
+- "feature_request": User wants new functionality, enhancement, or capability
+- "bug": Something is broken, not working as expected, or malfunctioning
+
+Consider these indicators:
+Feature Request: "can you add", "would be nice to have", "wish there was", "suggestion", "enhancement"
+Bug: "not working", "broken", "error", "issue", "problem", "doesn't work", "fails"
+
+Respond with JSON format:
+{{"type": "<feature_request|bug>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}}"""
 
     def _parse_severity_response(self, response_text: str) -> Dict[str, Any]:
         """Parse AI response for severity analysis."""
@@ -238,12 +276,39 @@ Respond with JSON format:
             logger.warning(f"Failed to parse categorization response: {e}")
             return {"category": "general", "tags": [], "confidence": 0.0}
 
+    def _parse_type_response(self, response_text: str) -> Dict[str, Any]:
+        """Parse AI response for type analysis."""
+        try:
+            response_text = response_text.strip()
+            if response_text.startswith("```json"):
+                response_text = response_text[7:-3]
+            elif response_text.startswith("```"):
+                response_text = response_text[3:-3]
+            
+            result = json.loads(response_text)
+            
+            issue_type = result.get("type", "bug")
+            if issue_type not in ["feature_request", "bug"]:
+                issue_type = "bug"  # Default to bug if invalid type
+            
+            confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
+            
+            return {
+                "type": issue_type,
+                "confidence": confidence,
+                "reasoning": result.get("reasoning", "AI analysis")
+            }
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(f"Failed to parse type response: {e}")
+            return {"type": "bug", "confidence": 0.0, "reasoning": "Parse error"}
+
     def _get_fallback_analysis(self) -> Dict[str, Any]:
         """Provide fallback analysis when AI fails."""
         return {
             "severity": {"severity_score": 3, "confidence": 0.0, "reasoning": "Fallback"},
             "sentiment": {"sentiment": "neutral", "urgency": 0.5, "confidence": 0.0},
             "categorization": {"category": "general", "tags": [], "confidence": 0.0},
+            "type": {"type": "bug", "confidence": 0.0, "reasoning": "Fallback"},
             "tenant_id": str(self.tenant_id)
         }
 

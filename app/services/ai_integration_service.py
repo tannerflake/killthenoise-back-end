@@ -93,14 +93,25 @@ class AIIntegrationService:
             updates["ai_tags"] = ",".join(category_data.get("tags", []))
             updates["ai_category_confidence"] = category_data.get("confidence")
 
+        # Apply type analysis
+        type_data = analysis.get("type", {})
+        if type_data.get("confidence", 0) > 0.3:
+            updates["type"] = type_data.get("type")
+            updates["ai_type_confidence"] = type_data.get("confidence")
+            updates["ai_type_reasoning"] = type_data.get("reasoning")
+
         # Preserve original data if AI confidence is low
         if not updates.get("severity"):
             updates["severity"] = original_data.get("severity", 3)
+        
+        if not updates.get("type"):
+            updates["type"] = original_data.get("type", "bug")
 
         # Ensure all AI fields have default values
         updates.setdefault("ai_severity_confidence", 0.0)
         updates.setdefault("ai_sentiment_confidence", 0.0)
         updates.setdefault("ai_category_confidence", 0.0)
+        updates.setdefault("ai_type_confidence", 0.0)
         updates.setdefault("ai_urgency", 0.5)
 
         # Remove None values to avoid database issues

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.services.ai_analysis_service import AIAnalysisService, create_ai_analysis_service
 from app.services.ai_config_service import get_claude_api_key, is_ai_enabled
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 logger = logging.getLogger(__name__)
@@ -14,8 +15,9 @@ logger = logging.getLogger(__name__)
 class AIIntegrationService:
     """Integration service that manages AI analysis for ticket processing."""
 
-    def __init__(self, tenant_id: UUID):
+    def __init__(self, tenant_id: UUID, session: AsyncSession):
         self.tenant_id = tenant_id
+        self.session = session
         self._ai_service: Optional[AIAnalysisService] = None
 
     async def enhance_ticket_data(
@@ -59,7 +61,8 @@ class AIIntegrationService:
                 logger.warning(f"No Claude API key available for tenant {self.tenant_id}")
                 return None
             
-            self._ai_service = create_ai_analysis_service(self.tenant_id, api_key)
+            # Pass the session to the AI service so it can access tenant settings
+            self._ai_service = create_ai_analysis_service(self.tenant_id, api_key, self.session)
         
         return self._ai_service
 
@@ -155,6 +158,6 @@ class AIIntegrationService:
             self._ai_service = None
 
 
-def create_ai_integration_service(tenant_id: UUID) -> AIIntegrationService:
+def create_ai_integration_service(tenant_id: UUID, session: AsyncSession) -> AIIntegrationService:
     """Factory function for creating tenant-specific AI integration services."""
-    return AIIntegrationService(tenant_id)
+    return AIIntegrationService(tenant_id, session)

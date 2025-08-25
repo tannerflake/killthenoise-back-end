@@ -22,8 +22,9 @@ class Issue(BaseModel):
     jira_exists: Optional[bool] = None
     ai_type_confidence: Optional[float] = None
     ai_type_reasoning: Optional[str] = None
+    team_id: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Column, DateTime, Float, Integer, JSON, String
+from sqlalchemy import Column, DateTime, Float, Integer, JSON, String, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -28,6 +28,9 @@ class AIIssueGroup(Base):
 
     # Optional quality/AI fields
     confidence = Column(Float, nullable=True)
+    
+    # Team assignment
+    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id"), nullable=True)
 
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     created_at = Column(DateTime(timezone=True), server_default=func.now())

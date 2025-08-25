@@ -9,6 +9,7 @@ from uuid import UUID
 from anthropic import Anthropic
 
 from app.db import get_db
+from app.services.tenant_settings_service import TenantSettingsService
 
 
 logger = logging.getLogger(__name__)
@@ -17,21 +18,25 @@ logger = logging.getLogger(__name__)
 class AIAnalysisService:
     """Core AI service for analyzing tickets and issues using Claude API."""
 
-    def __init__(self, tenant_id: UUID, api_key: str):
+    def __init__(self, tenant_id: UUID, api_key: str, session=None):
         self.tenant_id = tenant_id
         self.client = Anthropic(api_key=api_key)
+        self.session = session
 
     async def analyze_ticket_comprehensive(
         self, title: str, description: str, context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Perform comprehensive AI analysis of a ticket."""
         try:
+            # Get tenant-specific instructions
+            tenant_instructions = await self._get_tenant_instructions()
+            
             # Run analyses in parallel for better performance
             analyses = await asyncio.gather(
-                self.analyze_severity(title, description, context),
+                self.analyze_severity(title, description, context, tenant_instructions),
                 self.analyze_sentiment(title, description),
                 self.analyze_categorization(title, description),
-                self.analyze_type(title, description),
+                self.analyze_type(title, description, tenant_instructions),
                 return_exceptions=True
             )
 
@@ -52,16 +57,32 @@ class AIAnalysisService:
             logger.error(f"Comprehensive analysis failed for tenant {self.tenant_id}: {e}")
             return self._get_fallback_analysis()
 
-    async def analyze_severity(
-        self, title: str, description: str, context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Analyze ticket severity using AI."""
+    async def _get_tenant_instructions(self) -> Dict[str, str]:
+        """Get tenant-specific instructions for AI analysis."""
+        if not self.session:
+            return {}
+        
         try:
-            prompt = self._build_severity_prompt(title, description, context)
+            settings_service = TenantSettingsService(self.session)
+            return {
+                "severity_instructions": await settings_service.get_severity_calculation_instructions(self.tenant_id) or "",
+                "type_instructions": await settings_service.get_type_classification_instructions(self.tenant_id) or "",
+                "grouping_instructions": await settings_service.get_grouping_instructions(self.tenant_id) or ""
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get tenant instructions: {e}")
+            return {}
+
+    async def analyze_severity(
+        self, title: str, description: str, context: Dict[str, Any], tenant_instructions: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Analyze ticket severity using AI with tenant-specific instructions."""
+        try:
+            prompt = self._build_severity_prompt(title, description, context, tenant_instructions)
             
             response = self.client.messages.create(
                 model="claude-3-haiku-20240307",
-                max_tokens=150,
+                max_tokens=200,
                 messages=[{"role": "user", "content": prompt}]
             )
 
@@ -69,7 +90,7 @@ class AIAnalysisService:
 
         except Exception as e:
             logger.error(f"Severity analysis failed for tenant {self.tenant_id}: {e}")
-            return {"severity_score": 3, "confidence": 0.0, "reasoning": "Fallback"}
+            return {"severity_score": 50, "confidence": 0.0, "reasoning": "Fallback"}
 
     async def analyze_sentiment(self, title: str, description: str) -> Dict[str, Any]:
         """Analyze customer sentiment and urgency."""
@@ -107,10 +128,10 @@ class AIAnalysisService:
             logger.error(f"Categorization failed for tenant {self.tenant_id}: {e}")
             return {"category": "general", "tags": [], "confidence": 0.0}
 
-    async def analyze_type(self, title: str, description: str) -> Dict[str, Any]:
-        """Analyze whether the issue is a feature request or bug."""
+    async def analyze_type(self, title: str, description: str, tenant_instructions: Dict[str, str]) -> Dict[str, Any]:
+        """Analyze whether the issue is a feature request or bug with tenant-specific instructions."""
         try:
-            prompt = self._build_type_prompt(title, description)
+            prompt = self._build_type_prompt(title, description, tenant_instructions)
             
             response = self.client.messages.create(
                 model="claude-3-haiku-20240307",
@@ -125,25 +146,37 @@ class AIAnalysisService:
             return {"type": "bug", "confidence": 0.0, "reasoning": "Fallback"}
 
     def _build_severity_prompt(
-        self, title: str, description: str, context: Dict[str, Any]
+        self, title: str, description: str, context: Dict[str, Any], tenant_instructions: Dict[str, str]
     ) -> str:
-        """Build prompt for severity analysis."""
-        return f"""Analyze this customer support ticket and determine its severity level.
+        """Build prompt for severity analysis with tenant-specific instructions."""
+        tenant_severity_instructions = tenant_instructions.get("severity_instructions", "")
+        
+        base_prompt = f"""Analyze this customer support ticket and determine its severity level.
 
 Title: {title}
 Description: {description or 'No description provided'}
 Priority: {context.get('priority', 'Not specified')}
 Customer Type: {context.get('customer_type', 'Unknown')}
 
-Rate severity from 1-5 where:
-1 = Minimal (info request, minor question)
-2 = Low (non-urgent issue, workaround available)
-3 = Medium (affects functionality, no workaround)
-4 = High (significant business impact, urgent)
-5 = Critical (system down, revenue impact, security issue)
+Rate severity from 0-100 where:
+0-20 = Minimal (info request, minor question)
+21-40 = Low (non-urgent issue, workaround available)
+41-60 = Medium (affects functionality, no workaround)
+61-80 = High (significant business impact, urgent)
+81-100 = Critical (system down, revenue impact, security issue)
 
 Respond with JSON format:
-{{"severity_score": <1-5>, "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}}"""
+{{"severity_score": <0-100>, "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}}"""
+
+        if tenant_severity_instructions:
+            base_prompt += f"""
+
+TENANT-SPECIFIC INSTRUCTIONS:
+{tenant_severity_instructions}
+
+Please follow these tenant-specific instructions when calculating severity scores."""
+
+        return base_prompt
 
     def _build_sentiment_prompt(self, title: str, description: str) -> str:
         """Build prompt for sentiment analysis."""
@@ -171,9 +204,11 @@ Categories: technical, billing, account, feature_request, bug_report, integratio
 Respond with JSON format:
 {{"category": "<category>", "tags": ["<tag1>", "<tag2>"], "confidence": <0.0-1.0>}}"""
 
-    def _build_type_prompt(self, title: str, description: str) -> str:
-        """Build prompt for type analysis."""
-        return f"""Analyze this support ticket and determine if it's a feature request or a bug.
+    def _build_type_prompt(self, title: str, description: str, tenant_instructions: Dict[str, str]) -> str:
+        """Build prompt for type analysis with tenant-specific instructions."""
+        tenant_type_instructions = tenant_instructions.get("type_instructions", "")
+        
+        base_prompt = f"""Analyze this support ticket and determine if it's a feature request or a bug.
 
 Title: {title}
 Description: {description or 'No description provided'}
@@ -189,6 +224,16 @@ Bug: "not working", "broken", "error", "issue", "problem", "doesn't work", "fail
 Respond with JSON format:
 {{"type": "<feature_request|bug>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}}"""
 
+        if tenant_type_instructions:
+            base_prompt += f"""
+
+TENANT-SPECIFIC INSTRUCTIONS:
+{tenant_type_instructions}
+
+Please follow these tenant-specific instructions when classifying the issue type."""
+
+        return base_prompt
+
     def _parse_severity_response(self, response_text: str) -> Dict[str, Any]:
         """Parse AI response for severity analysis."""
         try:
@@ -201,8 +246,8 @@ Respond with JSON format:
             
             result = json.loads(response_text)
             
-            # Validate the response
-            severity = max(1, min(5, int(result.get("severity_score", 3))))
+            # Validate the response - now using 0-100 scale
+            severity = max(0, min(100, int(result.get("severity_score", 50))))
             confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
             
             return {
@@ -212,7 +257,7 @@ Respond with JSON format:
             }
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning(f"Failed to parse severity response: {e}")
-            return {"severity_score": 3, "confidence": 0.0, "reasoning": "Parse error"}
+            return {"severity_score": 50, "confidence": 0.0, "reasoning": "Parse error"}
 
     def _parse_sentiment_response(self, response_text: str) -> Dict[str, Any]:
         """Parse AI response for sentiment analysis."""
@@ -305,7 +350,7 @@ Respond with JSON format:
     def _get_fallback_analysis(self) -> Dict[str, Any]:
         """Provide fallback analysis when AI fails."""
         return {
-            "severity": {"severity_score": 3, "confidence": 0.0, "reasoning": "Fallback"},
+            "severity": {"severity_score": 50, "confidence": 0.0, "reasoning": "Fallback"},
             "sentiment": {"sentiment": "neutral", "urgency": 0.5, "confidence": 0.0},
             "categorization": {"category": "general", "tags": [], "confidence": 0.0},
             "type": {"type": "bug", "confidence": 0.0, "reasoning": "Fallback"},
@@ -313,6 +358,6 @@ Respond with JSON format:
         }
 
 
-def create_ai_analysis_service(tenant_id: UUID, api_key: str) -> AIAnalysisService:
+def create_ai_analysis_service(tenant_id: UUID, api_key: str, session=None) -> AIAnalysisService:
     """Factory function for creating tenant-specific AI analysis services."""
-    return AIAnalysisService(tenant_id, api_key)
+    return AIAnalysisService(tenant_id, api_key, session)

@@ -78,45 +78,68 @@ async def get_top_issues(
 @router.get("/")
 async def list_issues(
     source: str | None = None,
+    team_id: str | None = None,
     limit: int = Query(10, ge=1, le=100),
     session: AsyncSession = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Return paginated list of issues filtered by optional source."""
+    """List AI-grouped issues (not raw individual issues)."""
     try:
-        # Build query with optional source filter
-        stmt = select(Issue)
-        if source:
-            stmt = stmt.where(Issue.source == source)
+        from sqlalchemy import desc
+        from app.models.ai_issue_group import AIIssueGroup
         
-        stmt = stmt.order_by(desc(Issue.created_at)).limit(limit)
+        # Query AI issue groups instead of raw issues
+        stmt = select(AIIssueGroup)
+        
+        # Apply filters
+        if source:
+            # Filter by source if specified
+            stmt = stmt.where(AIIssueGroup.sources.contains([{"source": source}]))
+        
+        if team_id:
+            # Filter by team if specified
+            from uuid import UUID
+            team_uuid = UUID(team_id)
+            stmt = stmt.where(AIIssueGroup.team_id == team_uuid)
+        
+        stmt = stmt.order_by(desc(AIIssueGroup.updated_at)).limit(limit)
         
         result = await session.execute(stmt)
-        issues = result.scalars().all()
+        groups = result.scalars().all()
         
-        # Convert to dict format
-        issues_data = []
-        for issue in issues:
-            issues_data.append({
-                "id": str(issue.id),
-                "title": issue.title,
-                "description": issue.description,
-                "source": issue.source,
-                "source_id": issue.source_id,
-                "severity": issue.severity,
-                "frequency": issue.frequency,
-                "status": issue.status,
-                "type": issue.type,
-                "tags": issue.tags,
-                "jira_issue_key": issue.jira_issue_key,
-                "jira_status": issue.jira_status,
-                "jira_exists": issue.jira_exists,
-                "ai_type_confidence": issue.ai_type_confidence,
-                "ai_type_reasoning": issue.ai_type_reasoning,
-                "created_at": issue.created_at.isoformat() if issue.created_at else None,
-                "updated_at": issue.updated_at.isoformat() if issue.updated_at else None
+        def clean_summary(summary: str | None) -> str | None:
+            """Remove signature prefix from summary for frontend display."""
+            if not summary:
+                return None
+            if summary.startswith("sig:") and "|" in summary:
+                return summary.split("|", 1)[1]
+            return summary
+        
+        data = []
+        for group in groups:
+            # Get the individual reports for this group to count them
+            reports_stmt = select(AIIssueGroupReport).where(AIIssueGroupReport.group_id == group.id)
+            reports_result = await session.execute(reports_stmt)
+            reports = reports_result.scalars().all()
+            
+            data.append({
+                "id": str(group.id),
+                "title": group.title,
+                "description": clean_summary(group.summary),
+                "source": group.sources[0]["source"] if group.sources else "unknown",
+                "severity": group.severity or 50,  # Default to 50 if not set
+                "frequency": group.frequency,
+                "status": group.status or "open",
+                "type": "bug",  # Default type, could be enhanced later
+                "tags": group.tags.split(",") if group.tags else [],
+                "reports_count": len(reports),  # Number of individual reports in this group
+                "sources": group.sources,
+                "team_id": str(group.team_id) if group.team_id else None,
+                "created_at": group.created_at.isoformat() if group.created_at else None,
+                "updated_at": group.updated_at.isoformat() if group.updated_at else None
             })
         
-        return {"success": True, "data": issues_data, "count": len(issues_data)}
+        return {"success": True, "data": data, "count": len(data)}
+        
     except Exception as e:
         return {"success": False, "error": str(e), "data": [], "count": 0}
 
@@ -384,37 +407,51 @@ async def backfill_raw_reports_from_issues(
     Creates one RawReport per Issue row for the tenant.
     """
     from uuid import UUID
+    from app.services.ai_clustering_service import AIIssueClusteringService
 
     tid = UUID(tenant_id)
 
     try:
-        result = await session.execute(
-            select(Issue).where(Issue.tenant_id == tid)
-        )
+        # Get all issues (since current Issue model doesn't have tenant_id)
+        result = await session.execute(select(Issue))
         issues = result.scalars().all()
         created = 0
 
-        for it in issues:
-            title = it.title or ""
-            body = it.description or None
-            signature = _simple_signature(title, body)
-            external_id = it.jira_issue_key or it.hubspot_ticket_id
-            url = None
+        # Create AI clustering service
+        clustering = AIIssueClusteringService(tid, session)
 
-            rr = RawReport(
-                tenant_id=tid,
-                source=it.source or "unknown",
-                external_id=external_id,
-                title=title,
-                body=body,
-                url=url,
-                signature=signature,
-            )
-            session.add(rr)
-            created += 1
+        for it in issues:
+            try:
+                title = it.title or ""
+                body = it.description or None
+                external_id = str(it.id)  # Use issue ID as external_id
+                url = None
+
+                # Create raw report using clustering service
+                await clustering.ingest_raw_report(
+                    source=it.source or "unknown",
+                    external_id=external_id,
+                    title=title,
+                    body=body,
+                    url=url,
+                    commit=False  # Bulk insert without individual commits
+                )
+                created += 1
+            except Exception as e:
+                print(f"Error processing issue {it.id}: {e}")
+                continue
 
         await session.commit()
-        return {"success": True, "created": created}
+        
+        # Run clustering to create AI issue groups
+        print("Running clustering...")
+        clustering_result = await clustering.recluster()
+        
+        return {
+            "success": True, 
+            "created": created,
+            "clustering_result": clustering_result
+        }
     except Exception as e:
         await session.rollback()
         return {"success": False, "error": str(e)}

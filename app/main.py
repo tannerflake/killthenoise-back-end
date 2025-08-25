@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -12,8 +13,9 @@ from app.db import Base, engine
 load_dotenv()
 
 from app.api import (analytics, hubspot, health, integrations, issues,  # noqa: E402
-                     jira, sync, webhooks, slack)
+                     jira, sync, webhooks, slack, settings, teams)
 from app.services.scheduler_service import scheduler_service  # noqa: E402
+from app.services.background_sync_service import background_sync_service  # noqa: E402
 
 app = FastAPI(title="KillTheNoise API")
 
@@ -33,29 +35,30 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-async def on_startup() -> None:
-    """Start scheduler and verify database connection."""
-    
-    # NOTE: Database tables are now managed by Alembic migrations
-    # Run 'alembic upgrade head' to create/update tables
+async def startup_event():
+    """Startup event handler."""
     print("[Startup] Using Alembic for database migrations")
-
-    # Start the scheduler service
-    try:
-        await scheduler_service.start()
-        print("[Startup] Scheduler service started")
-    except Exception as exc:
-        print(f"[Startup] Failed to start scheduler: {exc!r}")
+    print("[Startup] Scheduler service started")
+    print("[Startup] Background sync service started")
+    
+    # Start scheduler service
+    await scheduler_service.start()
+    
+    # Start background sync service
+    asyncio.create_task(background_sync_service.start())
 
 
 @app.on_event("shutdown")
-async def on_shutdown() -> None:
-    """Stop scheduler and dispose database connections."""
-    try:
-        await scheduler_service.stop()
-        print("[Shutdown] Scheduler service stopped")
-    except Exception as exc:
-        print(f"[Shutdown] Error stopping scheduler: {exc!r}")
+async def shutdown_event():
+    """Shutdown event handler."""
+    print("[Shutdown] Scheduler service stopped")
+    print("[Shutdown] Background sync service stopped")
+    
+    # Stop scheduler service
+    await scheduler_service.stop()
+    
+    # Stop background sync service
+    await background_sync_service.stop()
 
     await engine.dispose()
 
@@ -70,6 +73,8 @@ app.include_router(sync.router)
 app.include_router(analytics.router)
 app.include_router(webhooks.router)
 app.include_router(slack.router)
+app.include_router(settings.router)
+app.include_router(teams.router)
 
 
 @app.get("/health")

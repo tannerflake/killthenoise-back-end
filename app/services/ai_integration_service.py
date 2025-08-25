@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.services.ai_analysis_service import AIAnalysisService, create_ai_analysis_service
 from app.services.ai_config_service import get_claude_api_key, is_ai_enabled
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 logger = logging.getLogger(__name__)
@@ -14,8 +15,9 @@ logger = logging.getLogger(__name__)
 class AIIntegrationService:
     """Integration service that manages AI analysis for ticket processing."""
 
-    def __init__(self, tenant_id: UUID):
+    def __init__(self, tenant_id: UUID, session: AsyncSession):
         self.tenant_id = tenant_id
+        self.session = session
         self._ai_service: Optional[AIAnalysisService] = None
 
     async def enhance_ticket_data(
@@ -59,7 +61,8 @@ class AIIntegrationService:
                 logger.warning(f"No Claude API key available for tenant {self.tenant_id}")
                 return None
             
-            self._ai_service = create_ai_analysis_service(self.tenant_id, api_key)
+            # Pass the session to the AI service so it can access tenant settings
+            self._ai_service = create_ai_analysis_service(self.tenant_id, api_key, self.session)
         
         return self._ai_service
 
@@ -93,14 +96,25 @@ class AIIntegrationService:
             updates["ai_tags"] = ",".join(category_data.get("tags", []))
             updates["ai_category_confidence"] = category_data.get("confidence")
 
+        # Apply type analysis
+        type_data = analysis.get("type", {})
+        if type_data.get("confidence", 0) > 0.3:
+            updates["type"] = type_data.get("type")
+            updates["ai_type_confidence"] = type_data.get("confidence")
+            updates["ai_type_reasoning"] = type_data.get("reasoning")
+
         # Preserve original data if AI confidence is low
         if not updates.get("severity"):
             updates["severity"] = original_data.get("severity", 3)
+        
+        if not updates.get("type"):
+            updates["type"] = original_data.get("type", "bug")
 
         # Ensure all AI fields have default values
         updates.setdefault("ai_severity_confidence", 0.0)
         updates.setdefault("ai_sentiment_confidence", 0.0)
         updates.setdefault("ai_category_confidence", 0.0)
+        updates.setdefault("ai_type_confidence", 0.0)
         updates.setdefault("ai_urgency", 0.5)
 
         # Remove None values to avoid database issues
@@ -144,6 +158,6 @@ class AIIntegrationService:
             self._ai_service = None
 
 
-def create_ai_integration_service(tenant_id: UUID) -> AIIntegrationService:
+def create_ai_integration_service(tenant_id: UUID, session: AsyncSession) -> AIIntegrationService:
     """Factory function for creating tenant-specific AI integration services."""
-    return AIIntegrationService(tenant_id)
+    return AIIntegrationService(tenant_id, session)

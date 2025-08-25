@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.raw_report import RawReport
 from app.models.ai_issue_group import AIIssueGroup
 from app.models.ai_issue_group_report import AIIssueGroupReport
+from app.services.team_service import TeamService
 
 
 def _simple_signature(title: str, body: str | None) -> str:
@@ -109,68 +110,48 @@ class AIIssueClusteringService:
 
             if not group:
                 # Store signature in summary with prefix for lookup
-                summary_with_sig = f"sig:{sig}|{summary}" if summary else f"sig:{sig}"
+                summary_with_sig = f"{signature_marker}|{summary}"
+                
+                # Assign team based on the group content
+                team_service = TeamService(self.session)
+                team_id = await team_service.assign_team_to_issue(title, summary, self.tenant_id)
+                
                 group = AIIssueGroup(
                     tenant_id=self.tenant_id,
                     title=title,
                     summary=summary_with_sig,
-                    severity=None,
-                    tags=None,
-                    status="open",
-                    frequency=0,
-                    sources=[],
+                    team_id=team_id,
                 )
                 self.session.add(group)
-                await self.session.flush()  # Get the group ID
                 created += 1
             else:
-                # Update existing group with new AI-generated title and summary
+                # Update existing group
                 group.title = title
-                summary_with_sig = f"sig:{sig}|{summary}" if summary else f"sig:{sig}"
-                group.summary = summary_with_sig
+                group.frequency = len(items)
                 updated += 1
 
-            # Clear existing links for this group first
-            from sqlalchemy import delete
+            # Update frequency and sources
+            group.frequency = len(items)
+            
+            # Update sources
+            source_counts = defaultdict(int)
+            for item in items:
+                source_counts[item.source] += 1
+            
+            group.sources = [{"source": source, "count": count} for source, count in source_counts.items()]
+
+            # Clear existing group-report links
             await self.session.execute(
                 delete(AIIssueGroupReport).where(AIIssueGroupReport.group_id == group.id)
             )
 
-            # Ensure link rows
-            seen_report_ids = set()
+            # Create new group-report links
             for item in items:
                 link = AIIssueGroupReport(group_id=group.id, report_id=item.id)
                 self.session.add(link)
-                seen_report_ids.add(item.id)
-
-            # Update rollups
-            group.frequency = len(items)
-            source_counts: Dict[str, int] = defaultdict(int)
-            for item in items:
-                source_counts[item.source] += 1
-            group.sources = [{"source": s, "count": c} for s, c in source_counts.items()]
-
-        # Clean up orphaned groups (groups with no linked reports)
-        from sqlalchemy import delete
-        orphaned_groups_query = select(AIIssueGroup.id).where(
-            and_(
-                AIIssueGroup.tenant_id == self.tenant_id,
-                ~AIIssueGroup.id.in_(
-                    select(AIIssueGroupReport.group_id).distinct()
-                )
-            )
-        )
-        orphaned_result = await self.session.execute(orphaned_groups_query)
-        orphaned_ids = [row[0] for row in orphaned_result]
-        
-        if orphaned_ids:
-            await self.session.execute(
-                delete(AIIssueGroup).where(AIIssueGroup.id.in_(orphaned_ids))
-            )
-            print(f"[AI_CLUSTERING] Cleaned up {len(orphaned_ids)} orphaned groups")
 
         await self.session.commit()
-        return {"success": True, "created": created, "updated": updated, "groups": len(sig_to_reports)}
+        return {"success": True, "created": created, "updated": updated, "groups": created + updated}
 
     async def _summarize_group(self, reports: List[RawReport]) -> Tuple[str, str]:
         """Generate AI summary for a group of reports using Claude."""

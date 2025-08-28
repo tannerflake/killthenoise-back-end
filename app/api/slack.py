@@ -146,6 +146,28 @@ async def slack_authorize_url(
         if not client_id or not redirect_uri:
             raise HTTPException(status_code=500, detail="Slack OAuth credentials not configured")
         
+        # Check for existing active Slack integration
+        from sqlalchemy import and_, select
+        stmt = select(TenantIntegration).where(
+            and_(
+                TenantIntegration.tenant_id == tenant_id,
+                TenantIntegration.integration_type == "slack",
+                TenantIntegration.is_active == True
+            )
+        )
+        result = await session.execute(stmt)
+        existing_integration = result.scalars().first()
+        
+        if existing_integration:
+            # If there's already an active integration, return an error
+            return {
+                "success": False,
+                "error": "Slack integration already exists",
+                "message": "This tenant already has an active Slack integration. Please disconnect the existing integration first if you want to reconnect.",
+                "existing_integration_id": str(existing_integration.id),
+                "needs_disconnect": True
+            }
+        
         # Create a temporary integration record to store the state
         from app.models.tenant_integration import TenantIntegration
         integration = TenantIntegration(
@@ -236,6 +258,18 @@ async def slack_oauth_callback(
         if not access_token:
             raise HTTPException(status_code=400, detail="Failed to obtain access token")
         
+        # Clean up any other Slack integrations for this tenant before activating the new one
+        from sqlalchemy import and_, delete
+        await session.execute(
+            delete(TenantIntegration).where(
+                and_(
+                    TenantIntegration.tenant_id == tenant_id,
+                    TenantIntegration.integration_type == "slack",
+                    TenantIntegration.id != integration.id
+                )
+            )
+        )
+        
         # Update the integration with OAuth tokens
         integration.config = {
             "access_token": access_token,
@@ -320,6 +354,55 @@ async def slack_refresh_token(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.delete("/disconnect/{tenant_id}")
+async def disconnect_slack_integration(
+    tenant_id: UUID,
+    session: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Disconnect/remove all Slack integrations for a tenant."""
+    try:
+        from sqlalchemy import and_, select, delete
+        
+        # Find all Slack integrations for this tenant
+        stmt = select(TenantIntegration).where(
+            and_(
+                TenantIntegration.tenant_id == tenant_id,
+                TenantIntegration.integration_type == "slack"
+            )
+        )
+        result = await session.execute(stmt)
+        integrations = result.scalars().all()
+        
+        if not integrations:
+            return {
+                "success": True,
+                "message": "No Slack integrations found to disconnect",
+                "integrations_removed": 0
+            }
+        
+        # Delete all Slack integrations for this tenant
+        await session.execute(
+            delete(TenantIntegration).where(
+                and_(
+                    TenantIntegration.tenant_id == tenant_id,
+                    TenantIntegration.integration_type == "slack"
+                )
+            )
+        )
+        
+        await session.commit()
+        
+        return {
+            "success": True,
+            "message": "Slack integration disconnected successfully",
+            "integrations_removed": len(integrations)
+        }
+        
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to disconnect: {str(e)}")
+
+
 # -------------------------------------------------------------------------
 # Legacy endpoints (for backward compatibility)
 # -------------------------------------------------------------------------
@@ -372,4 +455,122 @@ async def sync_slack_messages(
     """Sync Slack messages."""
     service = _service(tenant_id, session)
     return await service.sync_messages(lookback_days=lookback_days)
+
+
+@router.post("/cleanup-duplicates/{tenant_id}")
+async def cleanup_duplicate_slack_integrations(
+    tenant_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Clean up duplicate Slack integrations for a tenant.
+    
+    This endpoint will:
+    1. Find all Slack integrations for the tenant
+    2. Identify duplicates based on configuration
+    3. Keep the most recent/active integration
+    4. Deactivate or delete duplicate integrations
+    """
+    try:
+        from sqlalchemy import and_, select, update, delete
+        
+        # Get all Slack integrations for this tenant
+        stmt = select(TenantIntegration).where(
+            and_(
+                TenantIntegration.tenant_id == UUID(tenant_id),
+                TenantIntegration.integration_type == "slack"
+            )
+        ).order_by(TenantIntegration.created_at.desc())
+        
+        result = await session.execute(stmt)
+        integrations = result.scalars().all()
+        
+        if len(integrations) <= 1:
+            return {
+                "success": True,
+                "message": "No duplicate integrations found",
+                "integrations_found": len(integrations),
+                "integrations_removed": 0
+            }
+        
+        # Group integrations by type
+        oauth_integrations = []
+        legacy_integrations = []
+        invalid_integrations = []
+        
+        for integration in integrations:
+            config = integration.config or {}
+            if "access_token" in config and "refresh_token" in config:
+                oauth_integrations.append(integration)
+            elif "token" in config:
+                legacy_integrations.append(integration)
+            else:
+                invalid_integrations.append(integration)
+        
+        # Determine which integration to keep
+        to_keep = None
+        to_remove = []
+        
+        # Prefer OAuth integrations over legacy ones
+        if oauth_integrations:
+            # Keep the most recent active OAuth integration
+            active_oauth = [i for i in oauth_integrations if i.is_active]
+            if active_oauth:
+                to_keep = max(active_oauth, key=lambda x: x.created_at)
+                to_remove.extend([i for i in oauth_integrations if i != to_keep])
+            else:
+                to_keep = max(oauth_integrations, key=lambda x: x.created_at)
+                to_remove.extend([i for i in oauth_integrations if i != to_keep])
+        elif legacy_integrations:
+            to_keep = max(legacy_integrations, key=lambda x: x.created_at)
+            to_remove.extend([i for i in legacy_integrations if i != to_keep])
+        
+        # Add all invalid integrations to removal list
+        to_remove.extend(invalid_integrations)
+        
+        if not to_remove:
+            return {
+                "success": True,
+                "message": "No duplicate integrations found",
+                "integrations_found": len(integrations),
+                "integrations_removed": 0
+            }
+        
+        # Perform the cleanup
+        # Deactivate all integrations first
+        await session.execute(
+            update(TenantIntegration)
+            .where(TenantIntegration.tenant_id == UUID(tenant_id))
+            .where(TenantIntegration.integration_type == "slack")
+            .values(is_active=False)
+        )
+        
+        # Reactivate the one we want to keep
+        if to_keep:
+            await session.execute(
+                update(TenantIntegration)
+                .where(TenantIntegration.id == to_keep.id)
+                .values(is_active=True)
+            )
+        
+        # Delete the duplicate integrations
+        for integration in to_remove:
+            await session.execute(
+                delete(TenantIntegration)
+                .where(TenantIntegration.id == integration.id)
+            )
+        
+        await session.commit()
+        
+        return {
+            "success": True,
+            "message": "Duplicate integrations cleaned up successfully",
+            "integrations_found": len(integrations),
+            "integrations_removed": len(to_remove),
+            "kept_integration_id": str(to_keep.id) if to_keep else None,
+            "removed_integration_ids": [str(i.id) for i in to_remove]
+        }
+        
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
 

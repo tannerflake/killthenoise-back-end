@@ -7,6 +7,7 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import and_, select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -41,7 +42,6 @@ async def slack_auth_status(
     """Check if a tenant has an active Slack integration with valid tokens."""
     try:
         # Find active Slack integration for this tenant
-        from sqlalchemy import and_, select
         stmt = select(TenantIntegration).where(
             and_(
                 TenantIntegration.tenant_id == tenant_id,
@@ -147,7 +147,6 @@ async def slack_authorize_url(
             raise HTTPException(status_code=500, detail="Slack OAuth credentials not configured")
         
         # Check for existing active Slack integration
-        from sqlalchemy import and_, select
         stmt = select(TenantIntegration).where(
             and_(
                 TenantIntegration.tenant_id == tenant_id,
@@ -169,7 +168,6 @@ async def slack_authorize_url(
             }
         
         # Create a temporary integration record to store the state
-        from app.models.tenant_integration import TenantIntegration
         integration = TenantIntegration(
             tenant_id=tenant_id,
             integration_type="slack",
@@ -259,7 +257,6 @@ async def slack_oauth_callback(
             raise HTTPException(status_code=400, detail="Failed to obtain access token")
         
         # Clean up any other Slack integrations for this tenant before activating the new one
-        from sqlalchemy import and_, delete
         await session.execute(
             delete(TenantIntegration).where(
                 and_(
@@ -361,8 +358,6 @@ async def disconnect_slack_integration(
 ) -> Dict[str, Any]:
     """Disconnect/remove all Slack integrations for a tenant."""
     try:
-        from sqlalchemy import and_, select, delete
-        
         # Find all Slack integrations for this tenant
         stmt = select(TenantIntegration).where(
             and_(
@@ -471,8 +466,6 @@ async def cleanup_duplicate_slack_integrations(
     4. Deactivate or delete duplicate integrations
     """
     try:
-        from sqlalchemy import and_, select, update, delete
-        
         # Get all Slack integrations for this tenant
         stmt = select(TenantIntegration).where(
             and_(

@@ -105,10 +105,32 @@ async def slack_auth_status(
             
         except ValueError as e:
             # Token is invalid or expired
+            error_message = str(e)
+            if "Token expired and no refresh token available" in error_message:
+                # This might be a false positive - let's test the token directly
+                try:
+                    service = create_slack_service(tenant_id, integration.id)
+                    token = config.get("access_token")
+                    if token and await service._test_token_validity(token):
+                        # Token is actually still valid
+                        team_info = config.get("team")
+                        return {
+                            "authenticated": True,
+                            "message": "Slack integration is active and working (token tested directly)",
+                            "needs_auth": False,
+                            "can_refresh": bool(refresh_token),
+                            "integration_id": str(integration.id),
+                            "team": team_info,
+                            "scopes": ["channels:read", "channels:history", "groups:read", "groups:history"]
+                        }
+                    await service.close()
+                except Exception:
+                    pass
+            
             if refresh_token:
                 return {
                     "authenticated": False,
-                    "message": f"Token validation failed: {str(e)}",
+                    "message": f"Token validation failed: {error_message}",
                     "needs_auth": False,
                     "can_refresh": True,
                     "integration_id": str(integration.id)
@@ -116,7 +138,7 @@ async def slack_auth_status(
             else:
                 return {
                     "authenticated": False,
-                    "message": f"Token validation failed: {str(e)}",
+                    "message": f"Token validation failed: {error_message}",
                     "needs_auth": True,
                     "can_refresh": False,
                     "integration_id": str(integration.id)
@@ -179,7 +201,7 @@ async def slack_authorize_url(
         await session.refresh(integration)
         
         # Build authorization URL
-        scopes = "channels:read,channels:history,groups:read,groups:history,offline_access"
+        scopes = "channels:read,channels:history,groups:read,groups:history"
         state = f"{tenant_id}:{integration.id}"
         
         auth_url = (

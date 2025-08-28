@@ -73,23 +73,48 @@ class SlackService:
             raise ValueError("No access token found in integration config")
         
         # Check if token is expired (with 5-minute buffer)
-        if token_created_at:
-            created_at = dt.datetime.fromisoformat(token_created_at)
-            expires_at = created_at + dt.timedelta(seconds=expires_in)
-            buffer_time = dt.timedelta(minutes=5)
-            
-            if dt.datetime.utcnow() + buffer_time >= expires_at:
-                if refresh_token:
-                    logger.info(f"Refreshing expired Slack token for tenant {self.tenant_id}")
-                    new_token = await self._refresh_access_token(session, integration, refresh_token)
-                    if new_token:
-                        return new_token
+        if token_created_at and expires_in and expires_in > 0:
+            try:
+                created_at = dt.datetime.fromisoformat(token_created_at)
+                expires_at = created_at + dt.timedelta(seconds=expires_in)
+                buffer_time = dt.timedelta(minutes=5)
+                
+                if dt.datetime.utcnow() + buffer_time >= expires_at:
+                    if refresh_token:
+                        logger.info(f"Refreshing expired Slack token for tenant {self.tenant_id}")
+                        new_token = await self._refresh_access_token(session, integration, refresh_token)
+                        if new_token:
+                            return new_token
+                        else:
+                            raise ValueError("Failed to refresh access token")
                     else:
-                        raise ValueError("Failed to refresh access token")
-                else:
-                    raise ValueError("Token expired and no refresh token available")
+                        # For Slack OAuth v2, tokens can be long-lived and may not need refresh
+                        # Let's test the token first before assuming it's expired
+                        logger.info(f"Token appears expired but no refresh token available. Testing token validity for tenant {self.tenant_id}")
+                        if await self._test_token_validity(access_token):
+                            logger.info(f"Token is still valid despite expiration time for tenant {self.tenant_id}")
+                            return access_token
+                        else:
+                            raise ValueError("Token expired and no refresh token available")
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Error parsing token expiration for tenant {self.tenant_id}: {str(e)}")
+                # Continue with the token as-is
         
         return access_token
+
+    async def _test_token_validity(self, token: str) -> bool:
+        """Test if a Slack token is still valid by making a simple API call."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://slack.com/api/auth.test",
+                    headers=self._auth_headers(token)
+                )
+                data = response.json()
+                return data.get("ok", False)
+        except Exception as e:
+            logger.error(f"Error testing token validity: {str(e)}")
+            return False
 
     async def _refresh_access_token(self, session: AsyncSession, integration: TenantIntegration, refresh_token: str) -> Optional[str]:
         """Refresh the access token using the refresh token."""

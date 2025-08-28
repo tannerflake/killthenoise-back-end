@@ -179,7 +179,7 @@ async def slack_authorize_url(
         await session.refresh(integration)
         
         # Build authorization URL
-        scopes = "channels:read,channels:history,groups:read,groups:history"
+        scopes = "channels:read,channels:history,groups:read,groups:history,offline_access"
         state = f"{tenant_id}:{integration.id}"
         
         auth_url = (
@@ -268,11 +268,12 @@ async def slack_oauth_callback(
         )
         
         # Update the integration with OAuth tokens
+        from datetime import datetime
         integration.config = {
             "access_token": access_token,
             "refresh_token": refresh_token,
             "expires_in": expires_in,
-            "token_created_at": "2024-01-01T00:00:00",  # Will be updated by service
+            "token_created_at": datetime.utcnow().isoformat(),
             "team": team,
             "channels": []
         }
@@ -349,6 +350,53 @@ async def slack_refresh_token(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/debug/{tenant_id}")
+async def debug_slack_integration(
+    tenant_id: UUID,
+    session: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Debug endpoint to check Slack integration details."""
+    try:
+        stmt = select(TenantIntegration).where(
+            and_(
+                TenantIntegration.tenant_id == tenant_id,
+                TenantIntegration.integration_type == "slack"
+            )
+        )
+        result = await session.execute(stmt)
+        integrations = result.scalars().all()
+        
+        debug_info = {
+            "tenant_id": str(tenant_id),
+            "total_integrations": len(integrations),
+            "integrations": []
+        }
+        
+        for integration in integrations:
+            config = integration.config or {}
+            integration_info = {
+                "id": str(integration.id),
+                "is_active": integration.is_active,
+                "created_at": str(integration.created_at),
+                "updated_at": str(integration.updated_at),
+                "has_access_token": "access_token" in config,
+                "has_refresh_token": "refresh_token" in config,
+                "token_created_at": config.get("token_created_at"),
+                "expires_in": config.get("expires_in"),
+                "team": config.get("team"),
+                "config_keys": list(config.keys()) if config else []
+            }
+            debug_info["integrations"].append(integration_info)
+        
+        return debug_info
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "tenant_id": str(tenant_id)
+        }
 
 
 @router.delete("/disconnect/{tenant_id}")

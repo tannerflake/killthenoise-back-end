@@ -19,6 +19,7 @@ pydantic-extra-types = "^2.6.0"
 multiprocessing-logging = "^0.2"
 psycopg2-binary = "^2.9"
 anthropic = "^0.18.1"
+aiosqlite = "^0.21.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.3"

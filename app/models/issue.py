@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Index, Integer, String, Text, ForeignKey
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy import Boolean, Column, DateTime, Float, Index, Integer, String, Text, ForeignKey, JSON
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
 from app.db import Base
@@ -19,7 +19,7 @@ class Issue(Base):
     frequency = Column(Integer, nullable=True, default=1)
     status = Column(String(50), nullable=True, default='open')
     type = Column(String(20), nullable=True, default='bug')
-    tags = Column(ARRAY(Text), nullable=True)
+    tags = Column(JSON, nullable=True)
     jira_issue_key = Column(String(50), nullable=True)
     jira_status = Column(String(50), nullable=True)
     jira_exists = Column(Boolean, nullable=True, default=False)

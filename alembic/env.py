@@ -16,6 +16,11 @@ from app.models.issue import Issue  # Import all models here
 from app.models.sync_event import SyncEvent
 from app.models.tenant_integration import TenantIntegration
 from app.models.integration_token import IntegrationToken
+from app.models.ai_issue_group import AIIssueGroup
+from app.models.ai_issue_group_report import AIIssueGroupReport
+from app.models.raw_report import RawReport
+from app.models.team import Team
+from app.models.tenant_settings import TenantSettings
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -34,6 +39,8 @@ if not database_url:
 # Convert async URL to sync for Alembic
 if database_url.startswith("postgresql+asyncpg://"):
     database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+elif database_url.startswith("sqlite+aiosqlite://"):
+    database_url = database_url.replace("sqlite+aiosqlite://", "sqlite://")
 
 config.set_main_option("sqlalchemy.url", database_url)
 
